@@ -1,0 +1,211 @@
+package handler
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/thesis-shared/api/internal/content"
+	appmiddleware "github.com/thesis-shared/api/internal/middleware"
+)
+
+// ContentHandler 提供信息流、发帖、评论与互动接口。
+type ContentHandler struct{ service *content.Service }
+
+func NewContentHandler(service *content.Service) *ContentHandler {
+	return &ContentHandler{service: service}
+}
+
+type createPostRequest struct {
+	Content    string   `json:"content"`
+	PaperID    *string  `json:"paperId"`
+	RepostOf   *string  `json:"repostOf"`
+	GroupID    *string  `json:"groupId"`
+	Visibility string   `json:"visibility"`
+	Tags       []string `json:"tags"`
+}
+
+func (h *ContentHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
+	userID, ok := appmiddleware.UserID(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+		return
+	}
+	var req createPostRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	paperID, ok := parseOptionalUUID(w, req.PaperID, "paperId")
+	if !ok {
+		return
+	}
+	repostOf, ok := parseOptionalUUID(w, req.RepostOf, "repostOf")
+	if !ok {
+		return
+	}
+	groupID, ok := parseOptionalUUID(w, req.GroupID, "groupId")
+	if !ok {
+		return
+	}
+	post, err := h.service.CreatePost(r.Context(), userID, content.CreatePostInput{Content: req.Content, PaperID: paperID, RepostOf: repostOf, GroupID: groupID, Visibility: req.Visibility, Tags: req.Tags})
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"post": post})
+}
+
+func (h *ContentHandler) Feed(w http.ResponseWriter, r *http.Request) {
+	userID, ok := appmiddleware.UserID(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+		return
+	}
+	stream := r.URL.Query().Get("stream")
+	if stream == "" {
+		stream = "following"
+	}
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.Feed(r.Context(), userID, stream, r.URL.Query().Get("cursor"), limit)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *ContentHandler) Like(w http.ResponseWriter, r *http.Request)   { h.setLike(w, r, true) }
+func (h *ContentHandler) Unlike(w http.ResponseWriter, r *http.Request) { h.setLike(w, r, false) }
+func (h *ContentHandler) setLike(w http.ResponseWriter, r *http.Request, liked bool) {
+	userID, postID, ok := h.userAndPost(w, r)
+	if !ok {
+		return
+	}
+	count, err := h.service.SetLike(r.Context(), userID, postID, liked)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"liked": liked, "likeCount": count})
+}
+
+func (h *ContentHandler) Bookmark(w http.ResponseWriter, r *http.Request) { h.setBookmark(w, r, true) }
+func (h *ContentHandler) Unbookmark(w http.ResponseWriter, r *http.Request) {
+	h.setBookmark(w, r, false)
+}
+func (h *ContentHandler) setBookmark(w http.ResponseWriter, r *http.Request, bookmarked bool) {
+	userID, postID, ok := h.userAndPost(w, r)
+	if !ok {
+		return
+	}
+	if err := h.service.SetBookmark(r.Context(), userID, postID, bookmarked); err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"bookmarked": bookmarked})
+}
+
+func (h *ContentHandler) CreateComment(w http.ResponseWriter, r *http.Request) {
+	userID, postID, ok := h.userAndPost(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Content  string  `json:"content"`
+		ParentID *string `json:"parentId"`
+	}
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	parentID, ok := parseOptionalUUID(w, req.ParentID, "parentId")
+	if !ok {
+		return
+	}
+	comment, err := h.service.CreateComment(r.Context(), userID, postID, req.Content, parentID)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"comment": comment})
+}
+
+func (h *ContentHandler) ListComments(w http.ResponseWriter, r *http.Request) {
+	userID, postID, ok := h.userAndPost(w, r)
+	if !ok {
+		return
+	}
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.ListComments(r.Context(), userID, postID, r.URL.Query().Get("cursor"), limit)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *ContentHandler) userAndPost(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
+	userID, ok := appmiddleware.UserID(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+		return uuid.Nil, uuid.Nil, false
+	}
+	postID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		WriteError(w, http.StatusUnprocessableEntity, "validation_error", "帖子 ID 格式不正确")
+		return uuid.Nil, uuid.Nil, false
+	}
+	return userID, postID, true
+}
+
+func parseOptionalUUID(w http.ResponseWriter, raw *string, field string) (*uuid.UUID, bool) {
+	if raw == nil || *raw == "" {
+		return nil, true
+	}
+	id, err := uuid.Parse(*raw)
+	if err != nil {
+		WriteError(w, http.StatusUnprocessableEntity, "validation_error", field+" 格式不正确")
+		return nil, false
+	}
+	return &id, true
+}
+
+func parseLimit(w http.ResponseWriter, r *http.Request) (int32, bool) {
+	raw := r.URL.Query().Get("limit")
+	if raw == "" {
+		return 20, true
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit <= 0 || limit > 50 {
+		WriteError(w, http.StatusUnprocessableEntity, "validation_error", "limit 须为 1 到 50")
+		return 0, false
+	}
+	return int32(limit), true
+}
+
+func writeContentError(w http.ResponseWriter, err error) {
+	status, code, message := http.StatusInternalServerError, "internal_error", "服务暂时不可用"
+	switch {
+	case errors.Is(err, content.ErrValidation), errors.Is(err, content.ErrInvalidCursor):
+		status, code, message = http.StatusUnprocessableEntity, "validation_error", err.Error()
+	case errors.Is(err, content.ErrPaperNotFound):
+		status, code, message = http.StatusNotFound, "paper_not_found", "论文不存在"
+	case errors.Is(err, content.ErrRepostNotFound):
+		status, code, message = http.StatusNotFound, "repost_not_found", "原帖不存在或无权访问"
+	case errors.Is(err, content.ErrGroupNotMember):
+		status, code, message = http.StatusForbidden, "group_forbidden", "不是该群组成员"
+	case errors.Is(err, content.ErrPostNotFound), errors.Is(err, content.ErrParentNotFound):
+		status, code, message = http.StatusNotFound, "post_not_found", err.Error()
+	default:
+		slog.Error("内容操作失败", "err", err)
+	}
+	WriteError(w, status, code, message)
+}
