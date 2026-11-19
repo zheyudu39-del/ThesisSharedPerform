@@ -1,0 +1,133 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+   Ink & Seal — 设计 token（对应 docs/ink-and-seal-design.html）
+   浅色为默认；深色跟随系统偏好，且支持显式 .dark 覆盖。
+   ========================================================================== */
+
+@theme {
+  /* 色彩：纸 · 墨 · 印 */
+  --color-paper: #f6f5f1;
+  --color-surface: #ffffff;
+  --color-surface-2: #efeee9;
+
+  --color-ink: #1d2129;
+  --color-ink-2: #525a6a;
+  --color-ink-3: #8b919e;
+
+  --color-line: #e3e1db;
+  --color-line-strong: #d0cdc5;
+
+  --color-seal: #b53a2e;
+  --color-seal-deep: #8e2a20;
+  --color-seal-wash: #f5e4e1;
+
+  --color-good: #2f7a4d;
+  --color-good-wash: #e3efe7;
+  --color-warn: #a56b0c;
+  --color-warn-wash: #f4e9d6;
+  --color-danger: #c0392b;
+  --color-danger-wash: #f5e0dd;
+
+  /* 字体：优先使用 next/font 注入的已加载变量，回退到系统字体栈 */
+  --font-display: var(--font-display-loaded), "Iowan Old Style", Georgia, serif;
+  --font-body: var(--font-body-loaded), system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-mono-loaded), "SF Mono", "Cascadia Mono", monospace;
+
+  /* 圆角 */
+  --radius-s: 3px;
+  --radius-m: 6px;
+  --radius-l: 12px;
+
+  /* 阴影 */
+  --shadow-1: 0 1px 2px rgba(29, 33, 41, 0.06), 0 1px 1px rgba(29, 33, 41, 0.05);
+  --shadow-2: 0 2px 6px rgba(29, 33, 41, 0.08), 0 8px 24px rgba(29, 33, 41, 0.07);
+  --shadow-3: 0 6px 18px rgba(29, 33, 41, 0.12), 0 20px 50px rgba(29, 33, 41, 0.1);
+}
+
+:root {
+  color-scheme: light;
+}
+
+/* 深色：系统偏好（未显式选择浅色时生效） */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --color-paper: #121419;
+    --color-surface: #1a1e24;
+    --color-surface-2: #0e1014;
+    --color-ink: #e8e6e0;
+    --color-ink-2: #a8aeb9;
+    --color-ink-3: #6c7481;
+    --color-line: #2a2e37;
+    --color-line-strong: #3b414c;
+    --color-seal: #d45240;
+    --color-seal-deep: #e0715f;
+    --color-seal-wash: #3a211d;
+    --color-good: #62a57b;
+    --color-good-wash: #1e2f25;
+    --color-warn: #c8963f;
+    --color-warn-wash: #322819;
+    --color-danger: #d45a49;
+    --color-danger-wash: #3a211d;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.5), 0 10px 28px rgba(0, 0, 0, 0.45);
+    --shadow-3: 0 8px 22px rgba(0, 0, 0, 0.55), 0 24px 60px rgba(0, 0, 0, 0.5);
+    color-scheme: dark;
+  }
+}
+
+/* 深色：显式 .dark 覆盖 */
+.dark {
+  --color-paper: #121419;
+  --color-surface: #1a1e24;
+  --color-surface-2: #0e1014;
+  --color-ink: #e8e6e0;
+  --color-ink-2: #a8aeb9;
+  --color-ink-3: #6c7481;
+  --color-line: #2a2e37;
+  --color-line-strong: #3b414c;
+  --color-seal: #d45240;
+  --color-seal-deep: #e0715f;
+  --color-seal-wash: #3a211d;
+  --color-good: #62a57b;
+  --color-good-wash: #1e2f25;
+  --color-warn: #c8963f;
+  --color-warn-wash: #322819;
+  --color-danger: #d45a49;
+  --color-danger-wash: #3a211d;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 2px 8px rgba(0, 0, 0, 0.5), 0 10px 28px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 8px 22px rgba(0, 0, 0, 0.55), 0 24px 60px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--color-seal-wash);
+  color: var(--color-ink);
+}
+
+/* 焦点可见性 */
+:focus-visible {
+  outline: 2px solid var(--color-seal);
+  outline-offset: 2px;
+}
+
+/* 尊重减弱动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

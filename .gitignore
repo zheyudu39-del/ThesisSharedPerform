@@ -1,0 +1,36 @@
+# ---- dependencies ----
+node_modules/
+.pnpm-store/
+
+# ---- builds ----
+.next/
+out/
+dist/
+build/
+apps/api/bin/
+*.tsbuildinfo
+
+# ---- env & secrets ----
+.env
+.env.local
+.env.*.local
+*.pem
+
+# ---- logs ----
+*.log
+logs/
+
+# ---- generated (sqlc output is committed; this is a safety net) ----
+apps/api/internal/db/sqlc/db.go.bak
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# ---- misc ----
+*.tmp
+coverage/

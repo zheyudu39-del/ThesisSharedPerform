@@ -1,0 +1,14 @@
+{
+  "name": "thesis-shared",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.1.3",
+  "scripts": {
+    "dev": "pnpm --filter @thesis/web dev",
+    "build": "pnpm --filter @thesis/web build",
+    "lint": "pnpm --filter @thesis/web lint",
+    "infra:up": "docker compose -f infra/docker/docker-compose.yml up -d",
+    "infra:down": "docker compose -f infra/docker/docker-compose.yml down",
+    "infra:logs": "docker compose -f infra/docker/docker-compose.yml logs -f"
+  }
+}

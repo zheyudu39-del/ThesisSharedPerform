@@ -1,0 +1,52 @@
+package middleware
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/thesis-shared/api/internal/identity"
+)
+
+type userContextKey struct{}
+
+// TokenParser 是鉴权中间件对令牌解析器的最小依赖。
+type TokenParser interface {
+	Parse(string) (uuid.UUID, error)
+}
+
+// Authenticate 解析 Bearer 令牌，将用户 ID 放入请求上下文。
+func Authenticate(tokens TokenParser) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			parts := strings.Fields(r.Header.Get("Authorization"))
+			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+				unauthorized(w)
+				return
+			}
+			userID, err := tokens.Parse(parts[1])
+			if err != nil {
+				unauthorized(w)
+				return
+			}
+			ctx := context.WithValue(r.Context(), userContextKey{}, userID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// UserID 从上下文读取已鉴权用户；缺失时 ok 为 false。
+func UserID(ctx context.Context) (userID uuid.UUID, ok bool) {
+	userID, ok = ctx.Value(userContextKey{}).(uuid.UUID)
+	return userID, ok
+}
+
+func unauthorized(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{
+		"code": "unauthorized", "message": identity.InvalidToken.Error(),
+	}})
+}
