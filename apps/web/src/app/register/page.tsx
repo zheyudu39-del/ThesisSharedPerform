@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { AuthShell } from "@/components/AuthShell";
 import { RegisterForm } from "@/components/RegisterForm";
 
@@ -15,7 +16,21 @@ export default function RegisterPage() {
       lede="设置邮箱、密码与公开句柄。句柄会出现在你的主页与分享链接中。"
       footer="注册成功后会自动登录，并跳转到关注流。"
     >
-      <RegisterForm />
+      {/* useSearchParams 需要 Suspense 边界，否则整页退化为动态渲染。 */}
+      <Suspense fallback={<FormSkeleton />}>
+        <RegisterForm />
+      </Suspense>
     </AuthShell>
+  );
+}
+
+function FormSkeleton() {
+  return (
+    <div className="flex flex-col gap-5" aria-hidden>
+      {[0, 1, 2, 3].map((i) => (
+        <div key={i} className="h-16 animate-pulse rounded-[6px] bg-surface-2" />
+      ))}
+      <div className="h-10 animate-pulse rounded-[6px] bg-surface-2" />
+    </div>
   );
 }

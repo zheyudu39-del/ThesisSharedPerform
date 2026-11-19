@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { AuthField } from "@/components/AuthField";
+import { useAuth } from "@/components/AuthProvider";
 import {
   AuthError,
   register,
@@ -17,6 +18,8 @@ import {
  */
 export function RegisterForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const { setSession } = useAuth();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -40,8 +43,9 @@ export function RegisterForm() {
 
     setSubmitting(true);
     try {
-      await register(email, password, name, handle);
-      router.push("/");
+      const session = await register(email, password, name, handle);
+      setSession(session.user);
+      router.push(safeNext(searchParams.get("next")));
       router.refresh();
     } catch (error) {
       if (error instanceof AuthError) {
@@ -177,4 +181,15 @@ function focusFirstInvalid(errors: AuthFieldErrors) {
   const order: (keyof AuthFieldErrors)[] = ["email", "password", "name", "handle"];
   const first = order.find((key) => errors[key]);
   if (first) document.getElementById(`register-${first}`)?.focus();
+}
+
+/**
+ * 只接受站内相对路径，防止 `next` 被构造成外部跳转（开放重定向）。
+ * 拒绝 "//evil.com"、"/\evil.com" 与绝对 URL。
+ */
+function safeNext(raw: string | null): string {
+  if (!raw) return "/";
+  if (!raw.startsWith("/")) return "/";
+  if (raw.startsWith("//") || raw.startsWith("/\\")) return "/";
+  return raw;
 }
