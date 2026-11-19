@@ -29,8 +29,11 @@ export function SiteHeader() {
           <Link href="/" className="rounded-[6px] px-3 py-1.5 hover:bg-surface-2 hover:text-ink">
             关注流
           </Link>
-          <Link href="/" className="rounded-[6px] px-3 py-1.5 hover:bg-surface-2 hover:text-ink">
-            热门
+          <Link
+            href="/papers"
+            className="rounded-[6px] px-3 py-1.5 hover:bg-surface-2 hover:text-ink"
+          >
+            论文库
           </Link>
           <Link href="/" className="rounded-[6px] px-3 py-1.5 hover:bg-surface-2 hover:text-ink">
             群组

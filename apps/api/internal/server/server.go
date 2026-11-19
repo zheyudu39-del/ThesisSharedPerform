@@ -11,6 +11,7 @@ import (
 	"github.com/thesis-shared/api/internal/handler"
 	"github.com/thesis-shared/api/internal/identity"
 	appmiddleware "github.com/thesis-shared/api/internal/middleware"
+	"github.com/thesis-shared/api/internal/paper"
 )
 
 // Deps 是 server 构建路由时所需的外部依赖。
@@ -33,6 +34,8 @@ func New(d Deps) *http.Server {
 	// 版本化 API 前缀，后续业务路由都挂载在 /api/v1 下。
 	tokens := identity.NewTokenManager(d.Config.JWTSecret, d.Config.JWTTTL)
 	auth := handler.NewAuthHandler(identity.NewService(d.Pool, tokens))
+	paperSvc := paper.NewService(d.Pool, paper.NewFetcher())
+	papers := handler.NewPaperHandler(paperSvc)
 
 	// 限流：登录/注册是暴力破解与 Argon2 资源耗尽的主要入口。
 	// 每分钟每 IP 最多 10 次认证尝试（对应 PRD §7.3 安全设计中的登录限流）。
@@ -48,6 +51,11 @@ func New(d Deps) *http.Server {
 		r.Group(func(r chi.Router) {
 			r.Use(appmiddleware.Authenticate(tokens))
 			r.Get("/users/me", auth.Me)
+
+			// 论文解析：识别 DOI / arXiv 并抓取元数据，需登录（避免被匿名刷外部 API）。
+			r.Post("/papers/resolve", papers.Resolve)
+			r.Get("/papers", papers.List)
+			r.Get("/papers/{id}", papers.Get)
 		})
 	})
 
