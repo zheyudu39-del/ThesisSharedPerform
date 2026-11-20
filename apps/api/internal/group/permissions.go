@@ -57,6 +57,10 @@ func CanManageGroup(role Role) bool { return AtLeast(role, RoleAdmin) }
 //   - 可以移除自己（退出），但 owner 例外。
 //
 // 返回 nil 表示允许，否则返回对应的领域错误。
+//
+// 判定顺序是「先权限、后规则」：非 owner 操作 owner 属于越权（403），
+// 只有 owner 自己触发「群主不可变」规则时才返回 422。顺序反了会让
+// admin 得到「参数不合法」的误导性响应。
 func CanModifyMember(actor, target Role, sameUser bool) error {
 	if !CanManageGroup(actor) {
 		return ErrForbidden
@@ -65,7 +69,10 @@ func CanModifyMember(actor, target Role, sameUser bool) error {
 		return ErrMemberNotFound
 	}
 	if target == RoleOwner {
-		return ErrOwnerImmutable
+		if actor == RoleOwner {
+			return ErrOwnerImmutable
+		}
+		return ErrForbidden
 	}
 	if sameUser {
 		// 本人操作自己（非 owner）：admin 可以把自己降级或退出。
@@ -79,14 +86,21 @@ func CanModifyMember(actor, target Role, sameUser bool) error {
 }
 
 // CanChangeRoleTo 判断把目标成员改为 newRole 是否合法。
-// 目标为 owner 时不可改；其余情况沿用 CanModifyMember 的规则，
-// 且目标角色只能是 admin 或 member。
+//
+// 目标角色只能是 admin 或 member。目标为 owner 时分两种情况：
+//   - 操作者本人就是 owner：属于「群主不可降级」的规则违例，返回 422；
+//   - 操作者不是 owner（admin/member/非成员）：根本没有管理群主的权限，
+//     返回 403。先判权限再判规则，否则 admin 改群主会错误地得到 422，
+//     让客户端误以为是「参数不合法」而非「越权」。
 func CanChangeRoleTo(actor, target Role, newRole Role, sameUser bool) error {
 	if newRole != RoleAdmin && newRole != RoleMember {
 		return ErrValidation
 	}
 	if target == RoleOwner {
-		return ErrOwnerImmutable
+		if actor == RoleOwner {
+			return ErrOwnerImmutable
+		}
+		return ErrForbidden
 	}
 	return CanModifyMember(actor, target, sameUser)
 }
