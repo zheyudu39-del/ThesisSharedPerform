@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -141,17 +142,37 @@ type Querier interface {
 	ListGroupFeed(context.Context, db.ListGroupFeedParams) ([]db.ListGroupFeedRow, error)
 }
 
+// SearchDocument 是要写入检索索引的最小字段集合。
+// 与 content.SearchDocument 形状一致，但各自声明，避免两个业务包互相依赖。
+type SearchDocument struct {
+	EntityType string
+	EntityID   uuid.UUID
+	Title      string
+	Body       string
+}
+
+// Indexer 是检索索引的抽象，由 server 在组装时注入 search.Service 的适配器。
+// 为 nil 时所有索引调用都被跳过，业务写入不受影响。
+type Indexer interface {
+	Index(ctx context.Context, doc SearchDocument) error
+}
+
 // Service 实现群组领域逻辑。
 type Service struct {
 	pool    *pgxpool.Pool
 	queries Querier
 	now     func() time.Time
+	// indexer 可选：nil 时跳过索引。
+	indexer Indexer
 }
 
 // NewService 构造服务。pool 为 nil 时只读路径可用（测试替身场景）。
 func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{pool: pool, queries: db.New(pool), now: time.Now}
 }
+
+// SetIndexer 注入检索索引实现；不注入时索引被静默跳过。
+func (s *Service) SetIndexer(indexer Indexer) { s.indexer = indexer }
 
 // newServiceWithQuerier 用于测试注入替身；写路径在没有连接池时直接使用替身。
 func newServiceWithQuerier(queries Querier) *Service {
@@ -207,7 +228,28 @@ func (s *Service) CreateGroup(ctx context.Context, ownerID uuid.UUID, input Crea
 		}
 		return Group{}, err
 	}
+	// 建群已提交，索引失败只记日志，不影响建群结果。
+	s.indexGroup(ctx, created.ID.Bytes, policy, name, description)
 	return s.GetGroup(ctx, ownerID, stringValue(created.Slug))
+}
+
+// indexGroup 把群名与简介写入检索索引。
+//
+// 只索引 joinPolicy = public 的群：检索接口匿名可读，而「发现群组」列表
+// 也只暴露公开群；索引仅邀请/需审批的群会泄漏其存在与简介。
+// 标题用群名，正文用简介；简介为空时只索引标题。
+func (s *Service) indexGroup(ctx context.Context, groupID uuid.UUID, policy, name, description string) {
+	if s.indexer == nil || policy != string(db.GroupJoinPolicyPublic) {
+		return
+	}
+	if err := s.indexer.Index(ctx, SearchDocument{
+		EntityType: "group",
+		EntityID:   groupID,
+		Title:      name,
+		Body:       strings.TrimSpace(description),
+	}); err != nil {
+		slog.Error("索引群组失败", "groupId", groupID, "err", err)
+	}
 }
 
 func (s *Service) createGroupOnce(ctx context.Context, ownerID uuid.UUID, name, description, policy string) (db.Group, error) {

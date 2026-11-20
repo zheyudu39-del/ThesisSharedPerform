@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -14,7 +15,9 @@ import (
 	"github.com/thesis-shared/api/internal/handler"
 	"github.com/thesis-shared/api/internal/identity"
 	appmiddleware "github.com/thesis-shared/api/internal/middleware"
+	"github.com/thesis-shared/api/internal/notify"
 	"github.com/thesis-shared/api/internal/paper"
+	"github.com/thesis-shared/api/internal/search"
 	"github.com/thesis-shared/api/internal/storage"
 )
 
@@ -44,9 +47,22 @@ func New(d Deps) *http.Server {
 	auth := handler.NewAuthHandler(authService, d.Config.JWTTTL, d.Config.IsProduction())
 	paperSvc := paper.NewService(d.Pool, paper.NewFetcher())
 	papers := handler.NewPaperHandler(paperSvc)
-	contents := handler.NewContentHandler(content.NewService(d.Pool))
+
+	// 检索与通知：两者都不依赖其他业务包，先构造，再以接口注入到写入方。
+	searchSvc := search.NewService(d.Pool)
+	notifications := handler.NewHandler(notify.NewService(d.Pool))
+	searches := handler.NewSearchHandler(searchSvc)
+
+	// 内容与群组服务通过 Indexer 接口接收检索能力，避免包之间直接 import。
+	contentSvc := content.NewService(d.Pool)
+	contentSvc.SetIndexer(contentIndexer{service: searchSvc})
+	contents := handler.NewContentHandler(contentSvc)
+
 	users := handler.NewUserHandler(authService)
-	groups := handler.NewGroupHandler(group.NewService(d.Pool))
+
+	groupSvc := group.NewService(d.Pool)
+	groupSvc.SetIndexer(groupIndexer{service: searchSvc})
+	groups := handler.NewGroupHandler(groupSvc)
 
 	// 限流：登录/注册是暴力破解与 Argon2 资源耗尽的主要入口。
 	// 每分钟每 IP 最多 10 次认证尝试（对应 PRD §7.3 安全设计中的登录限流）。
@@ -76,6 +92,11 @@ func New(d Deps) *http.Server {
 			// 只读：无需 CSRF。
 			r.Get("/users/me", auth.Me)
 			r.Get("/feed", contents.Feed)
+
+			// 通知中心只读：通知天然属于个人数据，匿名没有读取语义。
+			r.Get("/notifications", notifications.List)
+			r.Get("/notifications/unread-count", notifications.UnreadCount)
+			r.Get("/notification-prefs", notifications.GetPrefs)
 
 			// 群组只读：成员名单、待审申请与群内动态都要求登录，
 			// 服务层再按角色/成员身份做访问控制。
@@ -116,6 +137,11 @@ func New(d Deps) *http.Server {
 				r.Post("/groups/{slug}/requests/{requestId}/approve", groups.ApproveRequest)
 				r.Post("/groups/{slug}/requests/{requestId}/reject", groups.RejectRequest)
 
+				// 通知写操作：标记已读会改变个人数据，必须带 CSRF 令牌。
+				r.Post("/notifications/{id}/read", notifications.MarkRead)
+				r.Post("/notifications/read-all", notifications.MarkAllRead)
+				r.Patch("/notification-prefs", notifications.UpdatePrefs)
+
 				// 文件上传流水线（PRD V-01~V-07 / P-05）。
 				// 对象存储不可用时（d.Storage == nil）不注册，避免出现必然失败的接口。
 				if d.Storage != nil {
@@ -150,6 +176,9 @@ func New(d Deps) *http.Server {
 			// myRole 在匿名时为 null。
 			r.Get("/groups", groups.List)
 			r.Get("/groups/{slug}", groups.Get)
+
+			// 统一检索：公开可读，匿名也能搜；结果只来自已索引的公开实体。
+			r.Get("/search", searches.Query)
 		})
 
 		// 公开个人主页：无需登录，供分享链接与搜索引擎抓取（PRD A-03 / §7.4）。
@@ -163,4 +192,31 @@ func New(d Deps) *http.Server {
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+}
+
+// contentIndexer 把 search.Service 适配成 content.Indexer。
+//
+// 适配放在 server 包：content / group 只认识自己的 Indexer 接口，
+// 不需要 import search；依赖方向始终是「业务包 ← server → search」。
+type contentIndexer struct{ service *search.Service }
+
+func (a contentIndexer) Index(ctx context.Context, doc content.SearchDocument) error {
+	return a.service.Index(ctx, search.IndexInput{
+		EntityType: doc.EntityType,
+		EntityID:   doc.EntityID,
+		Title:      doc.Title,
+		Body:       doc.Body,
+	})
+}
+
+// groupIndexer 把 search.Service 适配成 group.Indexer。
+type groupIndexer struct{ service *search.Service }
+
+func (a groupIndexer) Index(ctx context.Context, doc group.SearchDocument) error {
+	return a.service.Index(ctx, search.IndexInput{
+		EntityType: doc.EntityType,
+		EntityID:   doc.EntityID,
+		Title:      doc.Title,
+		Body:       doc.Body,
+	})
 }

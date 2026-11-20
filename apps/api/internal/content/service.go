@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 	"time"
@@ -102,6 +103,24 @@ type CommentsResult struct {
 	NextCursor *string   `json:"nextCursor"`
 }
 
+// SearchDocument 是要写入检索索引的最小字段集合。
+//
+// 与 search.IndexInput 字段一一对应，但这里重新声明一份而不是直接引用：
+// content 不 import search，避免两个业务包互相依赖（search 已依赖 db，
+// content 也依赖 db，直接互引会让依赖图出现环）。
+type SearchDocument struct {
+	EntityType string
+	EntityID   uuid.UUID
+	Title      string
+	Body       string
+}
+
+// Indexer 是检索索引的抽象，由 server 在组装时注入 search.Service 的适配器。
+// 为 nil 时（单元测试、未接入检索的部署）所有索引调用都被跳过，业务写入不受影响。
+type Indexer interface {
+	Index(ctx context.Context, doc SearchDocument) error
+}
+
 // readQuerier 是公开读路径（帖子详情、评论列表）用到的最小查询集合。
 // 单独抽出是为了让「匿名查看者 = uuid.Nil」的映射能在没有数据库的单元测试里验证。
 type readQuerier interface {
@@ -114,11 +133,17 @@ type readQuerier interface {
 type Service struct {
 	pool    *pgxpool.Pool
 	queries readQuerier
+	// indexer 可选：nil 时跳过索引，业务写入不受影响。
+	indexer Indexer
 }
 
 func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{pool: pool, queries: db.New(pool)}
 }
+
+// SetIndexer 注入检索索引实现。server 在创建内容服务后调用一次；
+// 不注入时索引被静默跳过（与 MVP「索引缺失可由重建任务补齐」的约定一致）。
+func (s *Service) SetIndexer(indexer Indexer) { s.indexer = indexer }
 
 // newServiceWithQuerier 用于测试注入替身；写路径仍需 pool，故只覆盖读路径。
 func newServiceWithQuerier(queries readQuerier) *Service { return &Service{queries: queries} }
@@ -244,7 +269,44 @@ func (s *Service) CreatePost(ctx context.Context, authorID uuid.UUID, input Crea
 	if err := tx.Commit(ctx); err != nil {
 		return Post{}, err
 	}
+	// 索引放在事务提交之后：索引失败不能回滚已经成功的发帖，
+	// 缺失的文档可由重建任务补齐（见 search.Service 的同步策略说明）。
+	s.indexPost(ctx, created.ID.Bytes, visibility, plainText)
 	return s.GetPost(ctx, authorID, created.ID.Bytes)
+}
+
+// indexPost 把帖子正文写入检索索引。
+//
+// 只索引 public 帖：检索接口是匿名可读的，若把 followers / group / private
+// 的正文也写进索引，未登录用户就能通过搜索读到本应受限的内容。
+// 标题取正文前 80 字（rune），正文用完整纯文本；两者都为空时（例如纯转发
+// 且没有附言）不写入，避免在索引里留下检索不到的空文档。
+// 失败只记日志：发帖已经成功，索引问题不应表现为 500。
+func (s *Service) indexPost(ctx context.Context, postID uuid.UUID, visibility, plainText string) {
+	if s.indexer == nil || visibility != string(db.PostVisibilityPublic) {
+		return
+	}
+	body := strings.TrimSpace(plainText)
+	if body == "" {
+		return
+	}
+	if err := s.indexer.Index(ctx, SearchDocument{
+		EntityType: "post",
+		EntityID:   postID,
+		Title:      truncateRunes(body, 80),
+		Body:       body,
+	}); err != nil {
+		slog.Error("索引帖子失败", "postId", postID, "err", err)
+	}
+}
+
+// truncateRunes 按 rune 截断，避免把多字节字符切坏。
+func truncateRunes(value string, max int) string {
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	return string(runes[:max])
 }
 
 // GetPost 返回单条帖子详情。

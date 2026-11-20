@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
+import { NotificationBell } from "@/components/NotificationBell";
 
 /**
  * 站点顶栏：品牌字标 + 主导航 + 登录态。
@@ -41,9 +42,23 @@ export function SiteHeader() {
           >
             群组
           </Link>
+          <Link
+            href="/search"
+            className="rounded-[6px] px-3 py-1.5 hover:bg-surface-2 hover:text-ink"
+          >
+            搜索
+          </Link>
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
+          {/* 手机端导航收起，搜索仍需可达：单独留一个图标入口。 */}
+          <Link
+            href="/search"
+            aria-label="搜索"
+            className="grid size-9 place-items-center rounded-[6px] text-ink-2 hover:bg-surface-2 hover:text-ink sm:hidden"
+          >
+            <SearchIcon />
+          </Link>
           {status === "loading" && (
             // 骨架：与服务端首帧一致，避免 hydration 闪烁。
             <span className="h-8 w-24 animate-pulse rounded-[6px] bg-surface-2" aria-hidden />
@@ -66,6 +81,9 @@ export function SiteHeader() {
             </>
           )}
 
+          {/* 铃铛放在用户菜单左侧；未登录时自身返回 null。 */}
+          <NotificationBell />
+
           {status === "authenticated" && user && (
             <UserMenu
               name={user.name}
@@ -79,6 +97,23 @@ export function SiteHeader() {
         </div>
       </div>
     </header>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      className="size-[18px]"
+      aria-hidden
+    >
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="m16 16 4.5 4.5" />
+    </svg>
   );
 }
 
