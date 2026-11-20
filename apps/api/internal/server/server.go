@@ -34,10 +34,12 @@ func New(d Deps) *http.Server {
 
 	// 版本化 API 前缀，后续业务路由都挂载在 /api/v1 下。
 	tokens := identity.NewTokenManager(d.Config.JWTSecret, d.Config.JWTTTL)
-	auth := handler.NewAuthHandler(identity.NewService(d.Pool, tokens))
+	authService := identity.NewService(d.Pool, tokens)
+	auth := handler.NewAuthHandler(authService)
 	paperSvc := paper.NewService(d.Pool, paper.NewFetcher())
 	papers := handler.NewPaperHandler(paperSvc)
 	contents := handler.NewContentHandler(content.NewService(d.Pool))
+	users := handler.NewUserHandler(authService)
 
 	// 限流：登录/注册是暴力破解与 Argon2 资源耗尽的主要入口。
 	// 每分钟每 IP 最多 10 次认证尝试（对应 PRD §7.3 安全设计中的登录限流）。
@@ -53,6 +55,9 @@ func New(d Deps) *http.Server {
 		r.Group(func(r chi.Router) {
 			r.Use(appmiddleware.Authenticate(tokens))
 			r.Get("/users/me", auth.Me)
+			r.Patch("/users/me", users.UpdateMe)
+			r.Post("/users/{handle}/follow", users.Follow)
+			r.Delete("/users/{handle}/follow", users.Unfollow)
 
 			// 论文解析：识别 DOI / arXiv 并抓取元数据，需登录（避免被匿名刷外部 API）。
 			r.Post("/papers/resolve", papers.Resolve)
@@ -61,6 +66,7 @@ func New(d Deps) *http.Server {
 
 			// 信息流与互动均要求登录，互动写操作在服务层事务中保证幂等。
 			r.Post("/posts", contents.CreatePost)
+			r.Get("/posts/{id}", contents.GetPost)
 			r.Get("/feed", contents.Feed)
 			r.Post("/posts/{id}/like", contents.Like)
 			r.Delete("/posts/{id}/like", contents.Unlike)
@@ -69,6 +75,13 @@ func New(d Deps) *http.Server {
 			r.Post("/posts/{id}/comments", contents.CreateComment)
 			r.Get("/posts/{id}/comments", contents.ListComments)
 		})
+
+		// 公开个人主页：无需登录，供分享链接与搜索引擎抓取（PRD A-03 / §7.4）。
+		// 令牌可选：有效令牌会让响应附带 following，供关注按钮正确初始化；
+		// 缺失或过期都按匿名处理，不拦截请求。
+		// 必须最后注册：chi 中静态段优先于参数段，/users/me 仍会命中上面的路由，
+		// 但把它排在 {handle} 之后可让意图更明确，也避免以后误加通配路由时被遮蔽。
+		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/users/{handle}", users.GetPublic)
 	})
 
 	return &http.Server{

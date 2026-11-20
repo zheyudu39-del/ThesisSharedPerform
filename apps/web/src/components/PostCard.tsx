@@ -149,6 +149,14 @@ export function PostCard({ post, onPatch, detail = false }: PostCardProps) {
     }
   }
 
+  /**
+   * 转发：跳转到帖子详情并带 `repost=1`，由详情页打开转发框。
+   * 未登录也允许跳转——详情页会展示带 next 的登录引导，保留转发意图。
+   */
+  function startRepost() {
+    router.push(`${detailHref}?repost=1`);
+  }
+
   const isRepost = post.type === "repost" && post.repostOf !== null;
   const initial = [...post.author.name][0] ?? "?";
   const detailHref = `/posts/${post.id}`;
@@ -297,23 +305,16 @@ export function PostCard({ post, onPatch, detail = false }: PostCardProps) {
           </Link>
         )}
 
-        {detail ? (
-          <span className="inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1.5 text-[0.84rem] text-ink-2">
-            <RepostIcon />
-            <span className="font-semibold">转发</span>
-            <span className="font-mono text-[0.78rem] tabular-nums">{post.repostCount}</span>
-          </span>
-        ) : (
-          <Link
-            href={detailHref}
-            className="inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1.5 text-[0.84rem] text-ink-2 hover:bg-surface-2"
-            aria-label="查看转发列表"
-          >
-            <RepostIcon />
-            <span className="font-semibold">转发</span>
-            <span className="font-mono text-[0.78rem] tabular-nums">{post.repostCount}</span>
-          </Link>
-        )}
+        <button
+          type="button"
+          onClick={startRepost}
+          className="inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1.5 text-[0.84rem] text-ink-2 transition-colors hover:bg-surface-2"
+          aria-label={`转发这条帖子（已有 ${post.repostCount} 次转发）`}
+        >
+          <RepostIcon />
+          <span className="font-semibold">转发</span>
+          <span className="font-mono text-[0.78rem] tabular-nums">{post.repostCount}</span>
+        </button>
 
         <button
           type="button"

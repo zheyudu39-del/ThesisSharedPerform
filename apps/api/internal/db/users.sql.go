@@ -11,6 +11,19 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countPostsByAuthor = `-- name: CountPostsByAuthor :one
+SELECT COUNT(*) FROM posts
+WHERE author_id = $1 AND deleted_at IS NULL
+`
+
+// 个人主页的帖子数：只统计未删除的帖子（含转发），与「发帖 Tab」口径一致。
+func (q *Queries) CountPostsByAuthor(ctx context.Context, authorID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countPostsByAuthor, authorID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (email, password_hash, name, handle)
 VALUES ($1, $2, $3, $4)
@@ -51,6 +64,43 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+	)
+	return i, err
+}
+
+const getPublicUserByHandle = `-- name: GetPublicUserByHandle :one
+SELECT id, name, handle, bio, institution, research_fields, verify_type, created_at
+FROM users
+WHERE handle = $1 AND deleted_at IS NULL AND status = 'active'
+LIMIT 1
+`
+
+type GetPublicUserByHandleRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	Name           string             `json:"name"`
+	Handle         string             `json:"handle"`
+	Bio            *string            `json:"bio"`
+	Institution    *string            `json:"institution"`
+	ResearchFields []string           `json:"research_fields"`
+	VerifyType     VerifyType         `json:"verify_type"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+// 公开投影：只选择可以对外展示的列。
+// 绝不包含 email / password_hash / role / status 等私密字段，
+// 避免个人主页接口意外泄露账号信息。
+func (q *Queries) GetPublicUserByHandle(ctx context.Context, handle string) (GetPublicUserByHandleRow, error) {
+	row := q.db.QueryRow(ctx, getPublicUserByHandle, handle)
+	var i GetPublicUserByHandleRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Handle,
+		&i.Bio,
+		&i.Institution,
+		&i.ResearchFields,
+		&i.VerifyType,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -127,6 +177,58 @@ LIMIT 1
 
 func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (User, error) {
 	row := q.db.QueryRow(ctx, getUserByID, id)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.EmailVerifiedAt,
+		&i.PasswordHash,
+		&i.Name,
+		&i.Handle,
+		&i.AvatarKey,
+		&i.Bio,
+		&i.Institution,
+		&i.ResearchFields,
+		&i.VerifyType,
+		&i.VerifyOrg,
+		&i.Role,
+		&i.Status,
+		&i.LastActiveAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
+const updateUserProfile = `-- name: UpdateUserProfile :one
+UPDATE users SET
+    name            = COALESCE($1::varchar(64), name),
+    bio             = COALESCE($2::varchar(280), bio),
+    institution     = COALESCE($3::varchar(128), institution),
+    research_fields = COALESCE($4::text[], research_fields)
+WHERE id = $5 AND deleted_at IS NULL
+RETURNING id, email, email_verified_at, password_hash, name, handle, avatar_key, bio, institution, research_fields, verify_type, verify_org, role, status, last_active_at, created_at, updated_at, deleted_at
+`
+
+type UpdateUserProfileParams struct {
+	Name           *string     `json:"name"`
+	Bio            *string     `json:"bio"`
+	Institution    *string     `json:"institution"`
+	ResearchFields []string    `json:"research_fields"`
+	ID             pgtype.UUID `json:"id"`
+}
+
+// 局部更新：参数为 NULL 表示「本次不修改」，空字符串/空数组表示「清空」。
+// 用 COALESCE 在单条语句内完成，避免读-改-写之间的并发覆盖。
+func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfileParams) (User, error) {
+	row := q.db.QueryRow(ctx, updateUserProfile,
+		arg.Name,
+		arg.Bio,
+		arg.Institution,
+		arg.ResearchFields,
+		arg.ID,
+	)
 	var i User
 	err := row.Scan(
 		&i.ID,

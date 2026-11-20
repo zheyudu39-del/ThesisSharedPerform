@@ -152,6 +152,21 @@ func (h *ContentHandler) ListComments(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// GetPost 处理 GET /api/v1/posts/{id}。
+// 帖子不存在与无权查看返回完全相同的 404，避免通过响应差异探测私密帖。
+func (h *ContentHandler) GetPost(w http.ResponseWriter, r *http.Request) {
+	userID, postID, ok := h.userAndPost(w, r)
+	if !ok {
+		return
+	}
+	post, err := h.service.GetPost(r.Context(), userID, postID)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"post": post})
+}
+
 func (h *ContentHandler) userAndPost(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
 	userID, ok := appmiddleware.UserID(r.Context())
 	if !ok {

@@ -128,21 +128,29 @@ JOIN users u ON u.id = p.author_id
 LEFT JOIN papers op ON op.id = p.paper_id
 LEFT JOIN posts rp ON rp.id = p.repost_of AND rp.deleted_at IS NULL
     AND (
-      rp.author_id = $1
+      rp.author_id = $2
       OR rp.visibility = 'public'
       OR (rp.visibility = 'followers'
-          AND EXISTS(SELECT 1 FROM follows rf WHERE rf.follower_id = $1 AND rf.followee_id = rp.author_id))
+          AND EXISTS(SELECT 1 FROM follows rf WHERE rf.follower_id = $2 AND rf.followee_id = rp.author_id))
       OR (rp.visibility = 'group' AND rp.group_id IS NOT NULL
-          AND EXISTS(SELECT 1 FROM group_members rgm WHERE rgm.group_id = rp.group_id AND rgm.user_id = $1))
+          AND EXISTS(SELECT 1 FROM group_members rgm WHERE rgm.group_id = rp.group_id AND rgm.user_id = $2))
     )
 LEFT JOIN users ru ON ru.id = rp.author_id
 LEFT JOIN papers rpp ON rpp.id = rp.paper_id
 WHERE p.id = $1 AND p.deleted_at IS NULL
+  AND (
+    p.author_id = $2
+    OR p.visibility = 'public'
+    OR (p.visibility = 'followers'
+        AND EXISTS(SELECT 1 FROM follows f WHERE f.follower_id = $2 AND f.followee_id = p.author_id))
+    OR (p.visibility = 'group' AND p.group_id IS NOT NULL
+        AND EXISTS(SELECT 1 FROM group_members gm WHERE gm.group_id = p.group_id AND gm.user_id = $2))
+  )
 `
 
 type GetPostByIDParams struct {
-	AuthorID pgtype.UUID `json:"author_id"`
-	UserID   pgtype.UUID `json:"user_id"`
+	ID     pgtype.UUID `json:"id"`
+	UserID pgtype.UUID `json:"user_id"`
 }
 
 type GetPostByIDRow struct {
@@ -197,8 +205,13 @@ type GetPostByIDRow struct {
 	RepostPaperCreatedAt     pgtype.Timestamptz `json:"repost_paper_created_at"`
 }
 
+// $1 是帖子 ID，$2 是当前查看者 ID。
+// 外层帖与转发原帖都套用同一套可见性谓词：本人 / public /
+// 已关注作者的 followers / 群成员。
+// 「不存在」与「无权查看」都返回空行，由服务层统一映射为同一个错误，
+// 避免通过响应差异探测私密帖是否存在。
 func (q *Queries) GetPostByID(ctx context.Context, arg GetPostByIDParams) (GetPostByIDRow, error) {
-	row := q.db.QueryRow(ctx, getPostByID, arg.AuthorID, arg.UserID)
+	row := q.db.QueryRow(ctx, getPostByID, arg.ID, arg.UserID)
 	var i GetPostByIDRow
 	err := row.Scan(
 		&i.ID,

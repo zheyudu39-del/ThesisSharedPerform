@@ -54,19 +54,38 @@ type Querier interface {
 	GetUserByID(context.Context, pgtype.UUID) (db.User, error)
 }
 
+// ProfileQuerier 是个人主页、关注关系与资料编辑所需的查询集合。
+// 与 Querier 分开，使只测注册登录的替身不必实现这些方法。
+type ProfileQuerier interface {
+	GetPublicUserByHandle(context.Context, string) (db.GetPublicUserByHandleRow, error)
+	UpdateUserProfile(context.Context, db.UpdateUserProfileParams) (db.User, error)
+	FollowUser(context.Context, db.FollowUserParams) (int64, error)
+	UnfollowUser(context.Context, db.UnfollowUserParams) (int64, error)
+	CountFollowers(context.Context, pgtype.UUID) (int64, error)
+	CountFollowing(context.Context, pgtype.UUID) (int64, error)
+	IsFollowing(context.Context, db.IsFollowingParams) (bool, error)
+	CountPostsByAuthor(context.Context, pgtype.UUID) (int64, error)
+}
+
 // Service 处理注册、登录和用户资料查询。
 type Service struct {
 	querier Querier
+	profile ProfileQuerier
 	pool    *pgxpool.Pool
 	tokens  *TokenManager
 }
 
 func NewService(pool *pgxpool.Pool, tokens *TokenManager) *Service {
-	return &Service{querier: db.New(pool), pool: pool, tokens: tokens}
+	q := db.New(pool)
+	return &Service{querier: q, profile: q, pool: pool, tokens: tokens}
 }
 
 func newService(querier Querier, tokens *TokenManager) *Service {
-	return &Service{querier: querier, tokens: tokens}
+	service := &Service{querier: querier, tokens: tokens}
+	if profile, ok := querier.(ProfileQuerier); ok {
+		service.profile = profile
+	}
+	return service
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterInput) (User, string, error) {
@@ -210,6 +229,232 @@ func classifyUniqueViolation(err error) error {
 	}
 	return fmt.Errorf("创建用户失败: %w", err)
 }
+
+// PublicUser 是个人主页对外暴露的资料，只含公开字段。
+// 刻意不包含 email、role、status 等私密字段，即使调用方拿到 JSON 也无法还原账号信息。
+type PublicUser struct {
+	ID             uuid.UUID `json:"id"`
+	Name           string    `json:"name"`
+	Handle         string    `json:"handle"`
+	Bio            string    `json:"bio"`
+	Institution    string    `json:"institution"`
+	ResearchFields []string  `json:"researchFields"`
+	VerifyType     string    `json:"verifyType"`
+	CreatedAt      time.Time `json:"createdAt"`
+}
+
+// Stats 是个人主页的统计数字，全部来自实时 COUNT。
+type Stats struct {
+	PostCount      int64 `json:"postCount"`
+	FollowerCount  int64 `json:"followerCount"`
+	FollowingCount int64 `json:"followingCount"`
+}
+
+// UpdateProfileInput 是局部更新入参：字段为 nil 表示请求体未提供该字段，保持不变。
+// ResearchFields 用指针区分「未提供」与「清空为 []」。
+type UpdateProfileInput struct {
+	Name           *string
+	Bio            *string
+	Institution    *string
+	ResearchFields *[]string
+}
+
+// Follow 关注 handle 对应的用户，返回关注后的状态与该用户的粉丝数。
+// 重复关注幂等：写入用 ON CONFLICT DO NOTHING，计数始终由表内 COUNT(*) 得出。
+func (s *Service) Follow(ctx context.Context, followerID uuid.UUID, handle string) (bool, int64, error) {
+	return s.setFollow(ctx, followerID, handle, true)
+}
+
+// Unfollow 取消关注，语义与 Follow 对称且幂等。
+func (s *Service) Unfollow(ctx context.Context, followerID uuid.UUID, handle string) (bool, int64, error) {
+	return s.setFollow(ctx, followerID, handle, false)
+}
+
+func (s *Service) setFollow(ctx context.Context, followerID uuid.UUID, handle string, follow bool) (bool, int64, error) {
+	if s.profile == nil {
+		return false, 0, fmt.Errorf("账号服务未配置资料查询")
+	}
+	target, err := s.profile.GetPublicUserByHandle(ctx, strings.TrimSpace(handle))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, 0, ErrUserNotFound
+	}
+	if err != nil {
+		return false, 0, fmt.Errorf("查询被关注用户失败: %w", err)
+	}
+	if target.ID.Bytes == followerID {
+		return false, 0, ErrSelfFollow
+	}
+
+	var count int64
+	// 写入与计数放在同一事务：计数读到的必然包含本次写入，
+	// 不会因为并发请求而在写入后读到旧值。
+	run := func(q ProfileQuerier) error {
+		if follow {
+			if _, err := q.FollowUser(ctx, db.FollowUserParams{FollowerID: uuidParam(followerID), FolloweeID: target.ID}); err != nil {
+				return err
+			}
+		} else {
+			if _, err := q.UnfollowUser(ctx, db.UnfollowUserParams{FollowerID: uuidParam(followerID), FolloweeID: target.ID}); err != nil {
+				return err
+			}
+		}
+		var err error
+		count, err = q.CountFollowers(ctx, target.ID)
+		return err
+	}
+	if err := s.withProfileTx(ctx, run); err != nil {
+		return false, 0, fmt.Errorf("更新关注关系失败: %w", err)
+	}
+	return follow, count, nil
+}
+
+// GetPublic 返回公开资料与统计。不存在的用户与已停用用户都返回 ErrUserNotFound。
+func (s *Service) GetPublic(ctx context.Context, handle string) (PublicUser, Stats, error) {
+	user, stats, _, err := s.GetPublicView(ctx, uuid.Nil, handle)
+	return user, stats, err
+}
+
+// GetPublicView 与 GetPublic 相同，但额外返回 viewerID 是否已关注此人。
+// viewerID 为零值表示匿名访问，此时 following 恒为 false。
+//
+// 关注状态只用于公开页面的按钮展示，不影响可见性，因此无需鉴权即可查询；
+// 但只有调用方确认令牌有效时才会传入 viewerID。
+func (s *Service) GetPublicView(ctx context.Context, viewerID uuid.UUID, handle string) (PublicUser, Stats, bool, error) {
+	if s.profile == nil {
+		return PublicUser{}, Stats{}, false, fmt.Errorf("账号服务未配置资料查询")
+	}
+	row, err := s.profile.GetPublicUserByHandle(ctx, strings.TrimSpace(handle))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PublicUser{}, Stats{}, false, ErrUserNotFound
+	}
+	if err != nil {
+		return PublicUser{}, Stats{}, false, fmt.Errorf("查询用户公开资料失败: %w", err)
+	}
+	postCount, err := s.profile.CountPostsByAuthor(ctx, row.ID)
+	if err != nil {
+		return PublicUser{}, Stats{}, false, fmt.Errorf("统计用户帖子数失败: %w", err)
+	}
+	followerCount, err := s.profile.CountFollowers(ctx, row.ID)
+	if err != nil {
+		return PublicUser{}, Stats{}, false, fmt.Errorf("统计粉丝数失败: %w", err)
+	}
+	followingCount, err := s.profile.CountFollowing(ctx, row.ID)
+	if err != nil {
+		return PublicUser{}, Stats{}, false, fmt.Errorf("统计关注数失败: %w", err)
+	}
+	following := false
+	if viewerID != uuid.Nil && viewerID != row.ID.Bytes {
+		following, err = s.profile.IsFollowing(ctx, db.IsFollowingParams{
+			FollowerID: uuidParam(viewerID), FolloweeID: row.ID,
+		})
+		if err != nil {
+			return PublicUser{}, Stats{}, false, fmt.Errorf("查询关注状态失败: %w", err)
+		}
+	}
+	return PublicUser{
+			ID:             row.ID.Bytes,
+			Name:           row.Name,
+			Handle:         row.Handle,
+			Bio:            textValue(row.Bio),
+			Institution:    textValue(row.Institution),
+			ResearchFields: nonNil(row.ResearchFields),
+			VerifyType:     string(row.VerifyType),
+			CreatedAt:      row.CreatedAt.Time.UTC(),
+		}, Stats{
+			PostCount:      postCount,
+			FollowerCount:  followerCount,
+			FollowingCount: followingCount,
+		}, following, nil
+}
+
+// UpdateProfile 局部更新本人资料，只写入请求中出现的字段。
+func (s *Service) UpdateProfile(ctx context.Context, userID uuid.UUID, input UpdateProfileInput) (User, error) {
+	params, err := buildUpdateProfileParams(userID, input)
+	if err != nil {
+		return User{}, err
+	}
+	if s.profile == nil {
+		return User{}, fmt.Errorf("账号服务未配置资料查询")
+	}
+	record, err := s.profile.UpdateUserProfile(ctx, params)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return User{}, ErrUserNotFound
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("更新用户资料失败: %w", err)
+	}
+	return userFromDB(record), nil
+}
+
+// buildUpdateProfileParams 做校验并组装参数。
+// 单独抽出便于在没有数据库的单元测试里覆盖校验规则。
+func buildUpdateProfileParams(userID uuid.UUID, input UpdateProfileInput) (db.UpdateUserProfileParams, error) {
+	params := db.UpdateUserProfileParams{ID: uuidParam(userID)}
+	if input.Name != nil {
+		name := strings.TrimSpace(*input.Name)
+		if n := utf8.RuneCountInString(name); n < 1 || n > 64 {
+			return db.UpdateUserProfileParams{}, fmt.Errorf("%w: 显示名长度须为 1 到 64 个字符", ValidationError)
+		}
+		params.Name = &name
+	}
+	if input.Bio != nil {
+		bio := strings.TrimSpace(*input.Bio)
+		if utf8.RuneCountInString(bio) > 280 {
+			return db.UpdateUserProfileParams{}, fmt.Errorf("%w: 简介不能超过 280 个字符", ValidationError)
+		}
+		params.Bio = &bio
+	}
+	if input.Institution != nil {
+		institution := strings.TrimSpace(*input.Institution)
+		if utf8.RuneCountInString(institution) > 128 {
+			return db.UpdateUserProfileParams{}, fmt.Errorf("%w: 机构名称不能超过 128 个字符", ValidationError)
+		}
+		params.Institution = &institution
+	}
+	if input.ResearchFields != nil {
+		// 先按请求原样校验条数：契约是「最多 10 项」，不能靠去重把超限请求悄悄放过。
+		if len(*input.ResearchFields) > 10 {
+			return db.UpdateUserProfileParams{}, fmt.Errorf("%w: 研究方向最多 10 项", ValidationError)
+		}
+		fields := make([]string, 0, len(*input.ResearchFields))
+		seen := make(map[string]struct{}, len(*input.ResearchFields))
+		for _, raw := range *input.ResearchFields {
+			field := strings.TrimSpace(raw)
+			if n := utf8.RuneCountInString(field); n < 1 || n > 64 {
+				return db.UpdateUserProfileParams{}, fmt.Errorf("%w: 研究方向每项须为 1 到 64 个字符", ValidationError)
+			}
+			if _, exists := seen[field]; exists {
+				continue
+			}
+			seen[field] = struct{}{}
+			fields = append(fields, field)
+		}
+		// 空切片而非 nil：nil 在 SQL 里是 NULL，会被 COALESCE 当作「不修改」。
+		params.ResearchFields = fields
+	}
+	return params, nil
+}
+
+// withProfileTx 在事务中执行资料写入；没有连接池（单元测试替身）时直接执行。
+func (s *Service) withProfileTx(ctx context.Context, fn func(ProfileQuerier) error) error {
+	if s.pool == nil {
+		return fn(s.profile)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(db.New(tx)); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("提交事务失败: %w", err)
+	}
+	return nil
+}
+
+func uuidParam(id uuid.UUID) pgtype.UUID { return pgtype.UUID{Bytes: id, Valid: id != uuid.Nil} }
 
 func userFromDB(record db.User) User {
 	return User{

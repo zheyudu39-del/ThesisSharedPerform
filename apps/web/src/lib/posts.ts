@@ -326,15 +326,17 @@ export async function getFeed(
 /**
  * 单个帖子详情。
  *
- * 契约中没有 `GET /posts/{id}`，后端也未实现：详情页因此主要依赖
- * {@link rememberPost} 的会话内快照（从信息流点进来时一定有）。这里仍保留
- * 该调用作为前向兼容——接口上线后无需改页面；当前会得到 404。
+ * 令牌可选：未登录也能尝试读取公开帖；服务端对「不存在」与「无权查看」
+ * 返回相同的 404（post_not_found），避免通过状态码探测私密帖是否存在。
+ *
+ * 详情页优先调用本接口，失败时才回退到 {@link recallPost} 的会话内快照，
+ * 因此冷启动直接打开分享链接也能正常渲染。
  */
 export async function getPost(id: string): Promise<PostDTO> {
   const body = await requestJSON(
     `/posts/${encodeURIComponent(id)}`,
     { method: "GET", cache: "no-store" },
-    "required",
+    "optional",
   );
   if (!isRecord(body) || !("post" in body)) throw invalidResponse();
   return normalizePost(body.post);

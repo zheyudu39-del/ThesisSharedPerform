@@ -35,6 +35,11 @@ UPDATE posts SET repost_count = repost_count + 1, updated_at = now()
 WHERE id = $1 AND deleted_at IS NULL;
 
 -- name: GetPostByID :one
+-- $1 是帖子 ID，$2 是当前查看者 ID。
+-- 外层帖与转发原帖都套用同一套可见性谓词：本人 / public /
+-- 已关注作者的 followers / 群成员。
+-- 「不存在」与「无权查看」都返回空行，由服务层统一映射为同一个错误，
+-- 避免通过响应差异探测私密帖是否存在。
 SELECT p.*, u.name AS author_name, u.handle AS author_handle, u.verify_type AS author_verify_type,
        EXISTS(SELECT 1 FROM reactions r WHERE r.user_id = $2 AND r.target_type = 'post' AND r.target_id = p.id AND r.kind = 'like') AS liked,
        EXISTS(SELECT 1 FROM reactions r WHERE r.user_id = $2 AND r.target_type = 'post' AND r.target_id = p.id AND r.kind = 'bookmark') AS bookmarked,
@@ -51,16 +56,24 @@ JOIN users u ON u.id = p.author_id
 LEFT JOIN papers op ON op.id = p.paper_id
 LEFT JOIN posts rp ON rp.id = p.repost_of AND rp.deleted_at IS NULL
     AND (
-      rp.author_id = $1
+      rp.author_id = $2
       OR rp.visibility = 'public'
       OR (rp.visibility = 'followers'
-          AND EXISTS(SELECT 1 FROM follows rf WHERE rf.follower_id = $1 AND rf.followee_id = rp.author_id))
+          AND EXISTS(SELECT 1 FROM follows rf WHERE rf.follower_id = $2 AND rf.followee_id = rp.author_id))
       OR (rp.visibility = 'group' AND rp.group_id IS NOT NULL
-          AND EXISTS(SELECT 1 FROM group_members rgm WHERE rgm.group_id = rp.group_id AND rgm.user_id = $1))
+          AND EXISTS(SELECT 1 FROM group_members rgm WHERE rgm.group_id = rp.group_id AND rgm.user_id = $2))
     )
 LEFT JOIN users ru ON ru.id = rp.author_id
 LEFT JOIN papers rpp ON rpp.id = rp.paper_id
-WHERE p.id = $1 AND p.deleted_at IS NULL;
+WHERE p.id = $1 AND p.deleted_at IS NULL
+  AND (
+    p.author_id = $2
+    OR p.visibility = 'public'
+    OR (p.visibility = 'followers'
+        AND EXISTS(SELECT 1 FROM follows f WHERE f.follower_id = $2 AND f.followee_id = p.author_id))
+    OR (p.visibility = 'group' AND p.group_id IS NOT NULL
+        AND EXISTS(SELECT 1 FROM group_members gm WHERE gm.group_id = p.group_id AND gm.user_id = $2))
+  );
 
 -- name: ListFollowingFeed :many
 SELECT p.*, u.name AS author_name, u.handle AS author_handle, u.verify_type AS author_verify_type,

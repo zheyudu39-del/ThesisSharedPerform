@@ -9,4 +9,6 @@ var (
 	InvalidCredentials = errors.New("邮箱或密码错误")
 	InvalidToken       = errors.New("无效或过期的令牌")
 	ValidationError    = errors.New("请求参数校验失败")
+	ErrUserNotFound    = errors.New("用户不存在")
+	ErrSelfFollow      = errors.New("不能关注自己")
 )

@@ -233,8 +233,11 @@ func (s *Service) CreatePost(ctx context.Context, authorID uuid.UUID, input Crea
 	return s.GetPost(ctx, authorID, created.ID.Bytes)
 }
 
+// GetPost 返回单条帖子详情。
+// 帖子不存在与当前用户无权查看返回同一个 ErrPostNotFound，
+// 使调用方无法通过响应差异探测私密帖是否存在。
 func (s *Service) GetPost(ctx context.Context, userID, postID uuid.UUID) (Post, error) {
-	row, err := db.New(s.pool).GetPostByID(ctx, db.GetPostByIDParams{AuthorID: uuidParam(postID), UserID: uuidParam(userID)})
+	row, err := db.New(s.pool).GetPostByID(ctx, db.GetPostByIDParams{ID: uuidParam(postID), UserID: uuidParam(userID)})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Post{}, ErrPostNotFound
 	}
