@@ -10,6 +10,7 @@ import (
 	"github.com/thesis-shared/api/internal/config"
 	"github.com/thesis-shared/api/internal/content"
 	"github.com/thesis-shared/api/internal/file"
+	"github.com/thesis-shared/api/internal/group"
 	"github.com/thesis-shared/api/internal/handler"
 	"github.com/thesis-shared/api/internal/identity"
 	appmiddleware "github.com/thesis-shared/api/internal/middleware"
@@ -45,6 +46,7 @@ func New(d Deps) *http.Server {
 	papers := handler.NewPaperHandler(paperSvc)
 	contents := handler.NewContentHandler(content.NewService(d.Pool))
 	users := handler.NewUserHandler(authService)
+	groups := handler.NewGroupHandler(group.NewService(d.Pool))
 
 	// 限流：登录/注册是暴力破解与 Argon2 资源耗尽的主要入口。
 	// 每分钟每 IP 最多 10 次认证尝试（对应 PRD §7.3 安全设计中的登录限流）。
@@ -75,6 +77,12 @@ func New(d Deps) *http.Server {
 			r.Get("/users/me", auth.Me)
 			r.Get("/feed", contents.Feed)
 
+			// 群组只读：成员名单、待审申请与群内动态都要求登录，
+			// 服务层再按角色/成员身份做访问控制。
+			r.Get("/groups/{slug}/members", groups.Members)
+			r.Get("/groups/{slug}/requests", groups.Requests)
+			r.Get("/groups/{slug}/feed", groups.Feed)
+
 			// 写接口：会话 Cookie 由浏览器自动携带，必须用双提交令牌区分
 			// 「本站发起」与「第三方站点伪造」，否则存在 CSRF 风险。
 			r.Group(func(r chi.Router) {
@@ -94,6 +102,19 @@ func New(d Deps) *http.Server {
 				r.Post("/posts/{id}/bookmark", contents.Bookmark)
 				r.Delete("/posts/{id}/bookmark", contents.Unbookmark)
 				r.Post("/posts/{id}/comments", contents.CreateComment)
+
+				// 群组写操作。建群、改群、成员与角色、邀请码、入群申请都在这里；
+				// 具体权限（owner > admin > member）由 group 服务层判定。
+				r.Post("/groups", groups.Create)
+				r.Patch("/groups/{slug}", groups.Update)
+				r.Post("/groups/join", groups.JoinByInvite)
+				r.Post("/groups/{slug}/join", groups.JoinPublic)
+				r.Patch("/groups/{slug}/members/{userId}", groups.UpdateMember)
+				r.Delete("/groups/{slug}/members/{userId}", groups.RemoveMember)
+				r.Post("/groups/{slug}/invites", groups.CreateInvite)
+				r.Post("/groups/{slug}/requests", groups.CreateRequest)
+				r.Post("/groups/{slug}/requests/{requestId}/approve", groups.ApproveRequest)
+				r.Post("/groups/{slug}/requests/{requestId}/reject", groups.RejectRequest)
 
 				// 文件上传流水线（PRD V-01~V-07 / P-05）。
 				// 对象存储不可用时（d.Storage == nil）不注册，避免出现必然失败的接口。
@@ -124,6 +145,11 @@ func New(d Deps) *http.Server {
 			r.Get("/papers/{id}", papers.Get)
 			r.Get("/posts/{id}", contents.GetPost)
 			r.Get("/posts/{id}/comments", contents.ListComments)
+
+			// 群组公开读：未登录也能查看群资料与公开群列表，
+			// myRole 在匿名时为 null。
+			r.Get("/groups", groups.List)
+			r.Get("/groups/{slug}", groups.Get)
 		})
 
 		// 公开个人主页：无需登录，供分享链接与搜索引擎抓取（PRD A-03 / §7.4）。

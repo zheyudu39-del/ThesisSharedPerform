@@ -34,6 +34,21 @@ func TestRoutesRegistered(t *testing.T) {
 		"GET /api/v1/users/me",
 		"PATCH /api/v1/users/me",
 		"GET /api/v1/posts/{id}",
+		"GET /api/v1/groups",
+		"POST /api/v1/groups",
+		"GET /api/v1/groups/{slug}",
+		"PATCH /api/v1/groups/{slug}",
+		"POST /api/v1/groups/join",
+		"POST /api/v1/groups/{slug}/join",
+		"GET /api/v1/groups/{slug}/members",
+		"PATCH /api/v1/groups/{slug}/members/{userId}",
+		"DELETE /api/v1/groups/{slug}/members/{userId}",
+		"POST /api/v1/groups/{slug}/invites",
+		"POST /api/v1/groups/{slug}/requests",
+		"GET /api/v1/groups/{slug}/requests",
+		"POST /api/v1/groups/{slug}/requests/{requestId}/approve",
+		"POST /api/v1/groups/{slug}/requests/{requestId}/reject",
+		"GET /api/v1/groups/{slug}/feed",
 	} {
 		if !registered[want] {
 			t.Errorf("路由未注册: %s（已注册: %s）", want, strings.Join(keys(registered), ", "))
@@ -66,6 +81,8 @@ func TestPublicReadRoutesAllowAnonymous(t *testing.T) {
 		{name: "帖子评论", method: http.MethodGet, target: "/api/v1/posts/" + id + "/comments"},
 		{name: "论文详情", method: http.MethodGet, target: "/api/v1/papers/" + id},
 		{name: "论文列表", method: http.MethodGet, target: "/api/v1/papers"},
+		{name: "群组列表", method: http.MethodGet, target: "/api/v1/groups"},
+		{name: "群组详情", method: http.MethodGet, target: "/api/v1/groups/some-lab"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -100,6 +117,19 @@ func TestWriteRoutesStillRequireAuth(t *testing.T) {
 		{name: "关注", method: http.MethodPost, target: "/api/v1/users/someone/follow"},
 		{name: "取消关注", method: http.MethodDelete, target: "/api/v1/users/someone/follow"},
 		{name: "更新资料", method: http.MethodPatch, target: "/api/v1/users/me"},
+		{name: "建群", method: http.MethodPost, target: "/api/v1/groups"},
+		{name: "改群", method: http.MethodPatch, target: "/api/v1/groups/some-lab"},
+		{name: "邀请码加入", method: http.MethodPost, target: "/api/v1/groups/join"},
+		{name: "直接加入公开群", method: http.MethodPost, target: "/api/v1/groups/some-lab/join"},
+		{name: "成员列表", method: http.MethodGet, target: "/api/v1/groups/some-lab/members"},
+		{name: "改成员角色", method: http.MethodPatch, target: "/api/v1/groups/some-lab/members/" + id},
+		{name: "移除成员", method: http.MethodDelete, target: "/api/v1/groups/some-lab/members/" + id},
+		{name: "创建邀请码", method: http.MethodPost, target: "/api/v1/groups/some-lab/invites"},
+		{name: "提交入群申请", method: http.MethodPost, target: "/api/v1/groups/some-lab/requests"},
+		{name: "查看入群申请", method: http.MethodGet, target: "/api/v1/groups/some-lab/requests"},
+		{name: "通过申请", method: http.MethodPost, target: "/api/v1/groups/some-lab/requests/" + id + "/approve"},
+		{name: "拒绝申请", method: http.MethodPost, target: "/api/v1/groups/some-lab/requests/" + id + "/reject"},
+		{name: "群内动态", method: http.MethodGet, target: "/api/v1/groups/some-lab/feed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

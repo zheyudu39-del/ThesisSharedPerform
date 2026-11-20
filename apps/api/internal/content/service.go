@@ -540,6 +540,12 @@ func postTags(value any) ([]string, error) {
 	}
 }
 
+// PostFromRow 把帖子行投影转换为 Post DTO。
+//
+// 导出它是为了让群组模块复用同一份投影：群内动态的 SQL 列与 GetPostByID
+// 完全一致，直接调用即可保证两个入口的 PostDTO 永不走样。
+func PostFromRow(row db.GetPostByIDRow) (Post, error) { return toPost(row) }
+
 func toPost(row db.GetPostByIDRow) (Post, error) {
 	tags, err := postTags(row.Tags)
 	if err != nil {
