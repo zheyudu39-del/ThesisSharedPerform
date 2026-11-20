@@ -25,6 +25,7 @@ import type {
   PostVisibility,
   RepostRef,
 } from "@/lib/posts";
+import type { GroupDTO, GroupRole, JoinPolicy } from "@/lib/groups";
 import type { PublicProfile, PublicUserDTO, PublicUserStats } from "@/lib/users";
 
 /** 直连 Go API 的绝对地址；与 lib/api.ts 保持一致。 */
@@ -44,7 +45,7 @@ const TIMEOUT_MS = 8000;
 /* 请求                                                                        */
 /* -------------------------------------------------------------------------- */
 
-async function fetchJSON(path: string): Promise<unknown | null> {
+async function fetchJSON(path: string, revalidate: number | false = REVALIDATE_SECONDS): Promise<unknown | null> {
   // 把浏览器的 Cookie 转发给 Go 服务：会话是 HttpOnly 的，服务端渲染时
   // 只有通过 Cookie 才能拿到登录态，进而渲染正确的 liked / following 状态。
   // cookies() 只在请求上下文中可用（RSC / Route Handler），构建期会抛错，故用 try 包裹。
@@ -62,7 +63,10 @@ async function fetchJSON(path: string): Promise<unknown | null> {
 
     const response = await fetch(`${API_BASE}/api/v1${path}`, {
       headers,
-      next: { revalidate: REVALIDATE_SECONDS },
+      // 需要身份区分的响应（如群内动态）不能进共享 Data Cache：
+      // Next 的缓存键只有 URL，不同用户的 Cookie 会命中同一份缓存。
+      next: revalidate === false ? { revalidate: 0 } : { revalidate },
+      cache: revalidate === false ? "no-store" : undefined,
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     if (!response.ok) return null;
@@ -238,6 +242,39 @@ function normalizePublicProfile(value: unknown): PublicProfile | null {
   };
 }
 
+function normalizeJoinPolicy(value: unknown): JoinPolicy {
+  return value === "public" || value === "request" || value === "invite" ? value : "invite";
+}
+
+function normalizeRole(value: unknown): GroupRole | null {
+  return value === "owner" || value === "admin" || value === "member" ? value : null;
+}
+
+function normalizeGroup(value: unknown): GroupDTO | null {
+  if (!isRecord(value)) return null;
+  const id = str(value.id);
+  if (!id) return null;
+  return {
+    id,
+    name: str(value.name) || "未命名群组",
+    slug: str(value.slug) || id,
+    description: str(value.description),
+    coverUrl: typeof value.coverUrl === "string" && value.coverUrl ? value.coverUrl : null,
+    ownerId: str(value.ownerId),
+    ownerName: str(value.ownerName),
+    joinPolicy: normalizeJoinPolicy(value.joinPolicy),
+    memberCount: num(value.memberCount),
+    myRole: normalizeRole(value.myRole),
+    createdAt: str(value.createdAt),
+  };
+}
+
+export type GroupDetailServer = {
+  group: GroupDTO;
+  myRole: GroupRole | null;
+  memberCount: number;
+};
+
 /* -------------------------------------------------------------------------- */
 /* 对外 API（React cache 去重：同一次渲染里 generateMetadata 与页面共享结果）   */
 /* -------------------------------------------------------------------------- */
@@ -261,6 +298,44 @@ export const fetchPost = cache(async (id: string): Promise<PostDTO | null> => {
   if (!isRecord(body)) return null;
   return normalizePost(body.post);
 });
+
+/** 读取群组详情（公开读）；不存在或接口不可用时返回 null。 */
+export const fetchGroup = cache(async (slug: string): Promise<GroupDetailServer | null> => {
+  // myRole 随会话变化：不能进共享 Data Cache，否则会把 A 的成员身份渲染给 B。
+  const body = await fetchJSON(`/groups/${encodeURIComponent(slug)}`, false);
+  if (!isRecord(body)) return null;
+
+  const group = normalizeGroup(body.group);
+  if (!group) return null;
+
+  const myRole = normalizeRole(body.myRole) ?? group.myRole;
+  const memberCount =
+    typeof body.memberCount === "number" && Number.isFinite(body.memberCount)
+      ? num(body.memberCount)
+      : group.memberCount;
+
+  return { group: { ...group, myRole, memberCount }, myRole, memberCount };
+});
+
+/**
+ * 读取一页群内动态（默认 20 条）；失败时返回 null。
+ * 群内动态仅成员可读，匿名访问会得到 401，页面按「登录后查看」降级。
+ */
+export const fetchGroupFeed = cache(
+  async (slug: string, limit = 20): Promise<{ posts: PostDTO[]; nextCursor: string | null } | null> => {
+    const params = new URLSearchParams({ limit: String(Math.min(Math.max(limit, 1), 50)) });
+    const body = await fetchJSON(
+      `/groups/${encodeURIComponent(slug)}/feed?${params.toString()}`,
+      false,
+    );
+    if (!isRecord(body) || !Array.isArray(body.posts)) return null;
+    return {
+      posts: body.posts.map(normalizePost).filter((p): p is PostDTO => p !== null),
+      nextCursor:
+        typeof body.nextCursor === "string" && body.nextCursor ? body.nextCursor : null,
+    };
+  },
+);
 
 /** 读取一页评论（默认 20 条）；失败时返回 null，页面按「暂无评论」降级。 */
 export const fetchComments = cache(

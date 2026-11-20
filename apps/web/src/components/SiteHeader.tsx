@@ -35,7 +35,10 @@ export function SiteHeader() {
           >
             论文库
           </Link>
-          <Link href="/" className="rounded-[6px] px-3 py-1.5 hover:bg-surface-2 hover:text-ink">
+          <Link
+            href="/groups"
+            className="rounded-[6px] px-3 py-1.5 hover:bg-surface-2 hover:text-ink"
+          >
             群组
           </Link>
         </nav>

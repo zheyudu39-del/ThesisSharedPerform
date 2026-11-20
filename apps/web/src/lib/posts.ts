@@ -198,7 +198,8 @@ function normalizeRepost(value: unknown): RepostRef | null {
   };
 }
 
-function normalizePost(value: unknown): PostDTO {
+/** 归一化任意来源的帖子数据；群组动态等模块复用同一套字段规则。 */
+export function normalizePost(value: unknown): PostDTO {
   if (!isRecord(value) || typeof value.id !== "string") throw invalidResponse();
 
   const visibility: PostVisibility =
