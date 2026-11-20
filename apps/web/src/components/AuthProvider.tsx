@@ -1,13 +1,14 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { AuthError, clearToken, getToken, me, type UserDTO } from "@/lib/auth";
+import { logout as apiLogout, me, type UserDTO } from "@/lib/auth";
+import { ApiError } from "@/lib/http";
 
 /**
  * 全局登录状态。
  *
- * 说明：M1 阶段令牌在 localStorage，因此「是否登录」只能在客户端确定。
- * 服务端渲染时 status 恒为 "loading"，组件应据此渲染骨架或占位，
+ * 说明：会话保存在 HttpOnly Cookie 中，前端无法直接读取，
+ * 只能在挂载后向服务端询问（/users/me）。服务端渲染时 status 恒为 "loading"，
  * 避免 SSR 与客户端 hydration 结果不一致（hydration mismatch）。
  */
 
@@ -35,10 +36,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
 
     async function restore() {
-      if (!getToken()) {
-        if (!cancelled) setStatus("anonymous");
-        return;
-      }
+      // 会话在 HttpOnly Cookie 里，前端无法直接判断是否存在，
+      // 只能向服务端询问；未登录时 /users/me 返回 401，me() 归一为 null。
       try {
         const current = await me();
         if (cancelled) return;
@@ -52,7 +51,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } catch (error) {
         if (cancelled) return;
         // 网络或服务端故障：不清令牌，降级为未登录但不误导用户。
-        if (error instanceof AuthError && error.status >= 500) {
+        if (error instanceof ApiError && error.status >= 500) {
           setStatus("anonymous");
           return;
         }
@@ -71,8 +70,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setStatus("authenticated");
   }, []);
 
-  const signOut = useCallback(() => {
-    clearToken();
+  const signOut = useCallback(async () => {
+    // 先清服务端 Cookie，再复位本地状态；即使请求失败也要让界面退出登录。
+    await apiLogout();
     setUser(null);
     setStatus("anonymous");
   }, []);

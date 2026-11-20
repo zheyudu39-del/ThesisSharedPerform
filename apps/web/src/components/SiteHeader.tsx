@@ -68,7 +68,7 @@ export function SiteHeader() {
               name={user.name}
               handle={user.handle}
               onSignOut={() => {
-                signOut();
+                void signOut();
                 router.push("/");
               }}
             />

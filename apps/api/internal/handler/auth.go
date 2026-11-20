@@ -6,23 +6,34 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/thesis-shared/api/internal/identity"
 	appmiddleware "github.com/thesis-shared/api/internal/middleware"
 )
 
-// AuthHandler 暴露注册、登录和当前用户资料接口。
+// AuthHandler 暴露注册、登录、登出和当前用户资料接口。
 type AuthHandler struct {
 	service *identity.Service
+	// ttl 是会话 Cookie 的有效期，与 JWT 的 exp 保持一致。
+	ttl  time.Duration
+	cook cookieConfig
 }
 
-func NewAuthHandler(service *identity.Service) *AuthHandler {
-	return &AuthHandler{service: service}
+func NewAuthHandler(service *identity.Service, ttl time.Duration, isProduction bool) *AuthHandler {
+	return &AuthHandler{
+		service: service,
+		ttl:     ttl,
+		cook:    newCookieConfig(isProduction),
+	}
 }
 
+// authResponse 只返回用户资料。
+//
+// 令牌不再出现在响应体里：它写在 HttpOnly Cookie 中，前端脚本无法读取，
+// 这正是本次改造的目的（XSS 无法窃取会话）。
 type authResponse struct {
-	User  identity.User `json:"user"`
-	Token string        `json:"token"`
+	User identity.User `json:"user"`
 }
 
 type registerRequest struct {
@@ -44,7 +55,10 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, authResponse{User: user, Token: token})
+	if !h.issueSession(w, token) {
+		return
+	}
+	writeJSON(w, http.StatusCreated, authResponse{User: user})
 }
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +76,32 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		writeAuthError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, authResponse{User: user, Token: token})
+	if !h.issueSession(w, token) {
+		return
+	}
+	writeJSON(w, http.StatusOK, authResponse{User: user})
+}
+
+// issueSession 下发会话与 CSRF 两个 Cookie。失败时已写好 500 响应。
+func (h *AuthHandler) issueSession(w http.ResponseWriter, token string) bool {
+	csrf, err := newCSRFToken()
+	if err != nil {
+		slog.Error("生成 CSRF 令牌失败", "err", err)
+		WriteError(w, http.StatusInternalServerError, "internal_error", "服务暂时不可用")
+		return false
+	}
+	setSessionCookie(w, token, h.ttl, h.cook)
+	setCSRFCookie(w, csrf, h.ttl, h.cook)
+	return true
+}
+
+// Logout 清除会话 Cookie。
+//
+// 该接口故意不要求登录：已过期或已失效的会话也应能安全登出。
+// 仍受 CSRFProtect 保护，防止第三方站点强制用户登出。
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	clearAuthCookies(w, h.cook)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {

@@ -16,10 +16,10 @@
  * ⚠️ 上传进度只能用 XMLHttpRequest：fetch 没有上传进度事件（ReadableStream
  * 请求体在浏览器端支持也不完整），因此这里没有走 fetch。
  *
- * 错误统一抛 {@link AuthError}（code / message / status），与 lib/posts.ts 一致。
+ * 错误统一抛 {@link ApiError}（code / message / status），与 lib/posts.ts 一致。
  */
 
-import { AuthError, getToken } from "@/lib/auth";
+import { ApiError, apiFetch } from "@/lib/http";
 
 /* -------------------------------------------------------------------------- */
 /* 常量与类型                                                                  */
@@ -139,7 +139,6 @@ export type UploadFileOptions = {
 /* -------------------------------------------------------------------------- */
 
 /** required：无令牌直接失败；optional：有令牌就带上（公开预览可匿名尝试）。 */
-type AuthMode = "required" | "optional";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -184,44 +183,8 @@ function extractError(body: unknown, status: number): { code: string; message: s
   return { code: "request_failed", message: fallbackMessage(status) };
 }
 
-function invalidResponse(): AuthError {
-  return new AuthError("invalid_response", "服务器返回了无法识别的响应。", 0);
-}
-
-async function requestJSON(path: string, init: RequestInit, auth: AuthMode): Promise<unknown> {
-  const token = getToken();
-  if (auth === "required" && !token) {
-    throw new AuthError("unauthorized", "请先登录后再上传文件。", 401);
-  }
-
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
-
-  let response: Response;
-  try {
-    response = await fetch(`/api/v1${path}`, { ...init, headers });
-  } catch {
-    throw new AuthError("network_error", "无法连接服务器，请检查网络后重试。", 0);
-  }
-
-  const text = await response.text();
-  let body: unknown = null;
-  if (text) {
-    try {
-      body = JSON.parse(text) as unknown;
-    } catch {
-      body = null;
-    }
-  }
-
-  if (!response.ok) {
-    const error = extractError(body, response.status);
-    throw new AuthError(error.code, error.message, response.status);
-  }
-
-  return body;
+function invalidResponse(): ApiError {
+  return new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -325,14 +288,10 @@ export async function presignFile(
   mime: string,
   sizeBytes: number,
 ): Promise<PresignResult> {
-  const body = await requestJSON(
-    "/files/presign",
-    {
+  const body = await apiFetch("/files/presign", {
       method: "POST",
       body: JSON.stringify({ filename, mime, sizeBytes }),
-    },
-    "required",
-  );
+    });
   return normalizePresign(body);
 }
 
@@ -353,7 +312,7 @@ export function uploadToS3(
     const { signal, onProgress } = options;
 
     if (signal?.aborted) {
-      reject(new AuthError("upload_aborted", "已取消上传。", 0));
+      reject(new ApiError("upload_aborted", "已取消上传。", 0));
       return;
     }
 
@@ -395,49 +354,45 @@ export function uploadToS3(
 
     xhr.onerror = () =>
       finish(() =>
-        reject(new AuthError("upload_failed", "上传失败：无法连接对象存储。", 0)),
+        reject(new ApiError("upload_failed", "上传失败：无法连接对象存储。", 0)),
       );
 
     xhr.ontimeout = () =>
-      finish(() => reject(new AuthError("upload_timeout", "上传超时，请重试。", 0)));
+      finish(() => reject(new ApiError("upload_timeout", "上传超时，请重试。", 0)));
 
     xhr.onabort = () =>
-      finish(() => reject(new AuthError("upload_aborted", "已取消上传。", 0)));
+      finish(() => reject(new ApiError("upload_aborted", "已取消上传。", 0)));
 
     signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
       xhr.send(file);
     } catch {
-      finish(() => reject(new AuthError("upload_failed", "上传失败，请重试。", 0)));
+      finish(() => reject(new ApiError("upload_failed", "上传失败，请重试。", 0)));
     }
   });
 }
 
-function uploadHttpError(status: number): AuthError {
+function uploadHttpError(status: number): ApiError {
   switch (status) {
     case 400:
-      return new AuthError("upload_failed", "对象存储拒绝了本次上传（请求不合法）。", 400);
+      return new ApiError("upload_failed", "对象存储拒绝了本次上传（请求不合法）。", 400);
     case 403:
-      return new AuthError(
+      return new ApiError(
         "upload_expired",
         "上传链接已过期或签名不匹配，请重新上传。",
         403,
       );
     case 413:
-      return new AuthError("upload_too_large", "文件超过对象存储的大小限制。", 413);
+      return new ApiError("upload_too_large", "文件超过对象存储的大小限制。", 413);
     default:
-      return new AuthError("upload_failed", `上传失败（HTTP ${status}）。`, status);
+      return new ApiError("upload_failed", `上传失败（HTTP ${status}）。`, status);
   }
 }
 
 /** 第 3 步：通知服务端上传完成，服务端会核对对象真实存在与大小并触发转码。 */
 export async function completeUpload(fileId: string, sizeBytes: number): Promise<FileDTO> {
-  const body = await requestJSON(
-    `/files/${encodeURIComponent(fileId)}/complete`,
-    { method: "POST", body: JSON.stringify({ sizeBytes }) },
-    "required",
-  );
+  const body = await apiFetch(`/files/${encodeURIComponent(fileId)}/complete`, { method: "POST", body: JSON.stringify({ sizeBytes }) });
   if (!isRecord(body) || !("file" in body)) throw invalidResponse();
   return normalizeFile(body.file);
 }
@@ -449,7 +404,7 @@ export async function uploadFile(
 ): Promise<FileDTO> {
   const validation = validateUpload(file);
   if (!validation.ok) {
-    throw new AuthError("validation_error", validation.message, 422);
+    throw new ApiError("validation_error", validation.message, 422);
   }
 
   const presign = await presignFile(file.name, validation.mime, file.size);
@@ -463,11 +418,7 @@ export async function uploadFile(
 
 /** 查询文件元信息；不存在或无权查看时服务端统一返回 404。 */
 export async function getFile(id: string): Promise<FileDTO> {
-  const body = await requestJSON(
-    `/files/${encodeURIComponent(id)}`,
-    { method: "GET", cache: "no-store" },
-    "optional",
-  );
+  const body = await apiFetch(`/files/${encodeURIComponent(id)}`, { method: "GET" });
   if (!isRecord(body) || !("file" in body)) throw invalidResponse();
   return normalizeFile(body.file);
 }
@@ -488,11 +439,7 @@ export async function getFilePages(
     size: String(Math.min(Math.max(Math.trunc(size), 1), 50)),
   });
 
-  const body = await requestJSON(
-    `/files/${encodeURIComponent(id)}/pages?${params.toString()}`,
-    { method: "GET", cache: "no-store" },
-    "optional",
-  );
+  const body = await apiFetch(`/files/${encodeURIComponent(id)}/pages?${params.toString()}`, { method: "GET" });
   if (!isRecord(body) || !Array.isArray(body.pages)) throw invalidResponse();
 
   const pages = body.pages

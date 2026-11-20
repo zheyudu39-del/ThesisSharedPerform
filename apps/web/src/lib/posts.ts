@@ -6,11 +6,11 @@
  * - 信息流（all / hot）、评论列表、帖子详情：令牌可选——未登录也尝试请求，
  *   若服务端返回 401 由调用方展示登录引导。
  *
- * 错误统一抛 {@link AuthError}（code / message / status），与 lib/papers.ts 一致，
+ * 错误统一抛 {@link ApiError}（code / message / status），与 lib/papers.ts 一致，
  * 页面只需读取 message 即可展示可读中文提示。
  */
 
-import { AuthError, getToken } from "@/lib/auth";
+import { ApiError, apiFetch } from "@/lib/http";
 import type { PaperDTO } from "@/lib/papers";
 
 export type { PaperDTO };
@@ -93,7 +93,6 @@ export type CreateCommentInput = {
 /* 请求与解析                                                                  */
 /* -------------------------------------------------------------------------- */
 
-type AuthMode = "required" | "optional";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -136,52 +135,16 @@ function fallbackMessage(status: number): string {
   }
 }
 
-async function requestJSON(path: string, init: RequestInit, auth: AuthMode): Promise<unknown> {
-  const token = getToken();
-  if (auth === "required" && !token) {
-    throw new AuthError("unauthorized", "请先登录后再继续。", 401);
-  }
-
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
-
-  let response: Response;
-  try {
-    response = await fetch(`/api/v1${path}`, { ...init, headers });
-  } catch {
-    throw new AuthError("network_error", "无法连接服务器，请检查网络后重试。", 0);
-  }
-
-  const text = await response.text();
-  let body: unknown = null;
-  if (text) {
-    try {
-      body = JSON.parse(text) as unknown;
-    } catch {
-      body = null;
-    }
-  }
-
-  if (!response.ok) {
-    const error = extractError(body, response.status);
-    throw new AuthError(error.code, error.message, response.status);
-  }
-
-  return body;
-}
-
-function invalidResponse(): AuthError {
-  return new AuthError("invalid_response", "服务器返回了无法识别的响应。", 0);
+function invalidResponse(): ApiError {
+  return new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);
 }
 
 /**
  * 信息流 404 的语义是「后端路由尚未上线」，而不是「这一页不存在」，
  * 因此换成更准确的中文提示。
  */
-function feedUnavailable(): AuthError {
-  return new AuthError("feed_unavailable", "信息流接口尚未开放，请稍后再试。", 404);
+function feedUnavailable(): ApiError {
+  return new ApiError("feed_unavailable", "信息流接口尚未开放，请稍后再试。", 404);
 }
 
 function normalizePaper(value: unknown): PaperDTO | null {
@@ -312,16 +275,11 @@ export async function getFeed(
   if (cursor) params.set("cursor", cursor);
 
   // 后端把 /feed 整体挂在 Authenticate 之后：三档流都要求登录。
-  const auth: AuthMode = "required";
   let body: unknown;
   try {
-    body = await requestJSON(
-      `/feed?${params.toString()}`,
-      { method: "GET", cache: "no-store" },
-      auth,
-    );
+    body = await apiFetch(`/feed?${params.toString()}`, { method: "GET" });
   } catch (err) {
-    if (err instanceof AuthError && err.status === 404) throw feedUnavailable();
+    if (err instanceof ApiError && err.status === 404) throw feedUnavailable();
     throw err;
   }
   return normalizePostList(body);
@@ -337,11 +295,7 @@ export async function getFeed(
  * 因此冷启动直接打开分享链接也能正常渲染。
  */
 export async function getPost(id: string): Promise<PostDTO> {
-  const body = await requestJSON(
-    `/posts/${encodeURIComponent(id)}`,
-    { method: "GET", cache: "no-store" },
-    "optional",
-  );
+  const body = await apiFetch(`/posts/${encodeURIComponent(id)}`);
   if (!isRecord(body) || !("post" in body)) throw invalidResponse();
   return normalizePost(body.post);
 }
@@ -388,11 +342,7 @@ export async function createPost(input: CreatePostInput): Promise<PostDTO> {
   if (input.groupId) payload.groupId = input.groupId;
   if (input.tags && input.tags.length > 0) payload.tags = input.tags;
 
-  const body = await requestJSON(
-    "/posts",
-    { method: "POST", body: JSON.stringify(payload) },
-    "required",
-  );
+  const body = await apiFetch("/posts", { method: "POST", body: JSON.stringify(payload) });
   if (!isRecord(body) || !("post" in body)) throw invalidResponse();
   return normalizePost(body.post);
 }
@@ -402,40 +352,24 @@ export async function createPost(input: CreatePostInput): Promise<PostDTO> {
 /* -------------------------------------------------------------------------- */
 
 export async function likePost(id: string): Promise<{ liked: boolean; likeCount: number }> {
-  const body = await requestJSON(
-    `/posts/${encodeURIComponent(id)}/like`,
-    { method: "POST" },
-    "required",
-  );
+  const body = await apiFetch(`/posts/${encodeURIComponent(id)}/like`, { method: "POST" });
   if (!isRecord(body)) throw invalidResponse();
   return { liked: body.liked === true, likeCount: num(body.likeCount) };
 }
 
 export async function unlikePost(id: string): Promise<{ liked: boolean; likeCount: number }> {
-  const body = await requestJSON(
-    `/posts/${encodeURIComponent(id)}/like`,
-    { method: "DELETE" },
-    "required",
-  );
+  const body = await apiFetch(`/posts/${encodeURIComponent(id)}/like`, { method: "DELETE" });
   if (!isRecord(body)) throw invalidResponse();
   return { liked: body.liked === true, likeCount: num(body.likeCount) };
 }
 
 export async function bookmarkPost(id: string): Promise<{ bookmarked: boolean }> {
-  const body = await requestJSON(
-    `/posts/${encodeURIComponent(id)}/bookmark`,
-    { method: "POST" },
-    "required",
-  );
+  const body = await apiFetch(`/posts/${encodeURIComponent(id)}/bookmark`, { method: "POST" });
   return { bookmarked: isRecord(body) && body.bookmarked === true };
 }
 
 export async function unbookmarkPost(id: string): Promise<{ bookmarked: boolean }> {
-  const body = await requestJSON(
-    `/posts/${encodeURIComponent(id)}/bookmark`,
-    { method: "DELETE" },
-    "required",
-  );
+  const body = await apiFetch(`/posts/${encodeURIComponent(id)}/bookmark`, { method: "DELETE" });
   return { bookmarked: isRecord(body) && body.bookmarked === true };
 }
 
@@ -451,11 +385,7 @@ export async function getComments(
   const params = new URLSearchParams({ limit: String(Math.min(Math.max(limit, 1), 50)) });
   if (cursor) params.set("cursor", cursor);
 
-  const body = await requestJSON(
-    `/posts/${encodeURIComponent(postId)}/comments?${params.toString()}`,
-    { method: "GET", cache: "no-store" },
-    "optional",
-  );
+  const body = await apiFetch(`/posts/${encodeURIComponent(postId)}/comments?${params.toString()}`, { method: "GET" });
   if (!isRecord(body) || !Array.isArray(body.comments)) throw invalidResponse();
   return {
     comments: body.comments.map(normalizeComment),
@@ -471,11 +401,7 @@ export async function createComment(
   // 契约允许显式传 null 表示一级评论；只在有父评论时才带上字段。
   if (input.parentId) payload.parentId = input.parentId;
 
-  const body = await requestJSON(
-    `/posts/${encodeURIComponent(postId)}/comments`,
-    { method: "POST", body: JSON.stringify(payload) },
-    "required",
-  );
+  const body = await apiFetch(`/posts/${encodeURIComponent(postId)}/comments`, { method: "POST", body: JSON.stringify(payload) });
   if (!isRecord(body) || !("comment" in body)) throw invalidResponse();
   return normalizeComment(body.comment);
 }

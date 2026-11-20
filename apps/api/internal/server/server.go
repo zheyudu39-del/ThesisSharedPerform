@@ -40,7 +40,7 @@ func New(d Deps) *http.Server {
 	// 版本化 API 前缀，后续业务路由都挂载在 /api/v1 下。
 	tokens := identity.NewTokenManager(d.Config.JWTSecret, d.Config.JWTTTL)
 	authService := identity.NewService(d.Pool, tokens)
-	auth := handler.NewAuthHandler(authService)
+	auth := handler.NewAuthHandler(authService, d.Config.JWTTTL, d.Config.IsProduction())
 	paperSvc := paper.NewService(d.Pool, paper.NewFetcher())
 	papers := handler.NewPaperHandler(paperSvc)
 	contents := handler.NewContentHandler(content.NewService(d.Pool))
@@ -52,36 +52,61 @@ func New(d Deps) *http.Server {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", handler.HealthCheck(d.Config.Env, d.Version, d.Pool))
+
+		// 登录/注册：限流保护。这两个接口不需要 CSRF ——
+		// 攻击者无法凭空构造有效凭据，响应也只是下发一个新会话。
 		r.Group(func(r chi.Router) {
 			r.Use(appmiddleware.LimitByIP(authLimiter))
 			r.Post("/auth/register", auth.Register)
 			r.Post("/auth/login", auth.Login)
 		})
+
+		// 登出：需要 CSRF，否则第三方站点可以强制用户登出（拒绝服务）。
+		r.Group(func(r chi.Router) {
+			r.Use(appmiddleware.CSRFProtect())
+			r.Post("/auth/logout", auth.Logout)
+		})
+
+		// 需要登录的接口。
 		r.Group(func(r chi.Router) {
 			r.Use(appmiddleware.Authenticate(tokens))
+
+			// 只读：无需 CSRF。
 			r.Get("/users/me", auth.Me)
-			r.Patch("/users/me", users.UpdateMe)
-			r.Post("/users/{handle}/follow", users.Follow)
-			r.Delete("/users/{handle}/follow", users.Unfollow)
-
-			// 论文解析：识别 DOI / arXiv 并抓取元数据，需登录（避免被匿名刷外部 API）。
-			r.Post("/papers/resolve", papers.Resolve)
-
-			// 信息流与互动写操作均要求登录，写操作在服务层事务中保证幂等。
-			r.Post("/posts", contents.CreatePost)
 			r.Get("/feed", contents.Feed)
-			r.Post("/posts/{id}/like", contents.Like)
-			r.Delete("/posts/{id}/like", contents.Unlike)
-			r.Post("/posts/{id}/bookmark", contents.Bookmark)
-			r.Delete("/posts/{id}/bookmark", contents.Unbookmark)
-			r.Post("/posts/{id}/comments", contents.CreateComment)
 
-			// 文件上传流水线（PRD V-01~V-07 / P-05）。
-			// 对象存储不可用时（d.Storage == nil）不注册，避免出现必然失败的接口。
+			// 写接口：会话 Cookie 由浏览器自动携带，必须用双提交令牌区分
+			// 「本站发起」与「第三方站点伪造」，否则存在 CSRF 风险。
+			r.Group(func(r chi.Router) {
+				r.Use(appmiddleware.CSRFProtect())
+
+				r.Patch("/users/me", users.UpdateMe)
+				r.Post("/users/{handle}/follow", users.Follow)
+				r.Delete("/users/{handle}/follow", users.Unfollow)
+
+				// 论文解析：识别 DOI / arXiv 并抓取元数据，需登录（避免被匿名刷外部 API）。
+				r.Post("/papers/resolve", papers.Resolve)
+
+				// 信息流写操作在服务层事务中保证幂等。
+				r.Post("/posts", contents.CreatePost)
+				r.Post("/posts/{id}/like", contents.Like)
+				r.Delete("/posts/{id}/like", contents.Unlike)
+				r.Post("/posts/{id}/bookmark", contents.Bookmark)
+				r.Delete("/posts/{id}/bookmark", contents.Unbookmark)
+				r.Post("/posts/{id}/comments", contents.CreateComment)
+
+				// 文件上传流水线（PRD V-01~V-07 / P-05）。
+				// 对象存储不可用时（d.Storage == nil）不注册，避免出现必然失败的接口。
+				if d.Storage != nil {
+					files := handler.NewFileHandler(file.NewService(d.Pool, d.Storage))
+					r.Post("/files/presign", files.Presign)
+					r.Post("/files/{id}/complete", files.Complete)
+				}
+			})
+
+			// 文件读取：只读，无需 CSRF。
 			if d.Storage != nil {
 				files := handler.NewFileHandler(file.NewService(d.Pool, d.Storage))
-				r.Post("/files/presign", files.Presign)
-				r.Post("/files/{id}/complete", files.Complete)
 				r.Get("/files/{id}", files.Get)
 				r.Get("/files/{id}/pages", files.Pages)
 			}
@@ -91,11 +116,8 @@ func New(d Deps) *http.Server {
 		//
 		// 服务端渲染时没有用户令牌，若这些路由仍挂在 Authenticate 下，渲染进程只能
 		// 拿到 401，爬虫也就只能看到空壳页面。因此它们改用 OptionalAuthenticate：
-		// 带了有效令牌照常注入 viewerID（liked/bookmarked 等个性化字段正确），
-		// 没有令牌按匿名放行，由服务层的可见性谓词只放行 public 内容。
-		//
-		// 写接口（发帖、点赞、收藏、评论、论文解析、关注、资料编辑、文件）仍然
-		// 全部留在上面的 Authenticate 组内，匿名读的开放不构成任何写权限。
+		// 带了有效会话照常注入 viewerID（liked/bookmarked 等个性化字段正确），
+		// 没有会话按匿名放行，由服务层的可见性谓词只放行 public 内容。
 		r.Group(func(r chi.Router) {
 			r.Use(appmiddleware.OptionalAuthenticate(tokens))
 			r.Get("/papers", papers.List)
@@ -105,10 +127,8 @@ func New(d Deps) *http.Server {
 		})
 
 		// 公开个人主页：无需登录，供分享链接与搜索引擎抓取（PRD A-03 / §7.4）。
-		// 令牌可选：有效令牌会让响应附带 following，供关注按钮正确初始化；
-		// 缺失或过期都按匿名处理，不拦截请求。
-		// 必须最后注册：chi 中静态段优先于参数段，/users/me 仍会命中上面的路由，
-		// 但把它排在 {handle} 之后可让意图更明确，也避免以后误加通配路由时被遮蔽。
+		// 令牌可选：有效会话会让响应附带 following，供关注按钮正确初始化。
+		// 必须最后注册：chi 中静态段优先于参数段，/users/me 仍会命中上面的路由。
 		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/users/{handle}", users.GetPublic)
 	})
 

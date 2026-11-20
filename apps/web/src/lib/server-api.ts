@@ -6,7 +6,8 @@
  * 并且它们的请求地址是相对路径 `/api/v1/*`，服务端 fetch 必须用绝对地址。
  *
  * 约定：
- * - 只读、匿名请求；公开读接口（papers / posts / users）后端已允许匿名访问；
+ * - 只读请求；公开读接口后端允许匿名访问，若浏览器带了会话 Cookie，
+ *   则转发给 Go 服务，让 SSR 能渲染出 liked / bookmarked / following 等个性化字段；
  * - 任何失败（404、网络错误、超时、5xx）都返回 null / []，由调用方决定
  *   notFound() 或降级渲染，绝不让一个坏掉的接口拖垮整页；
  * - 用 React `cache` 在单次请求内去重：generateMetadata 与页面各调用一次，
@@ -14,6 +15,7 @@
  */
 
 import { cache } from "react";
+import { cookies } from "next/headers";
 import type { PaperAuthor, PaperDTO } from "@/lib/papers";
 import type {
   CommentDTO,
@@ -43,9 +45,23 @@ const TIMEOUT_MS = 8000;
 /* -------------------------------------------------------------------------- */
 
 async function fetchJSON(path: string): Promise<unknown | null> {
+  // 把浏览器的 Cookie 转发给 Go 服务：会话是 HttpOnly 的，服务端渲染时
+  // 只有通过 Cookie 才能拿到登录态，进而渲染正确的 liked / following 状态。
+  // cookies() 只在请求上下文中可用（RSC / Route Handler），构建期会抛错，故用 try 包裹。
+  let cookieHeader = "";
   try {
+    const store = await cookies();
+    cookieHeader = store.toString();
+  } catch {
+    // 无请求上下文（例如构建期静态分析）：按匿名处理。
+  }
+
+  try {
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (cookieHeader) headers.Cookie = cookieHeader;
+
     const response = await fetch(`${API_BASE}/api/v1${path}`, {
-      headers: { Accept: "application/json" },
+      headers,
       next: { revalidate: REVALIDATE_SECONDS },
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });

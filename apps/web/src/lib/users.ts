@@ -7,10 +7,11 @@
  * - 关注 / 取关：必须带令牌，服务端保证幂等，计数以响应为准；
  * - `PATCH /users/me`：局部更新本人资料，只发送请求体中出现的字段。
  *
- * 错误统一抛 {@link AuthError}（code / message / status），与 lib/posts.ts 一致。
+ * 错误统一抛 {@link ApiError}（code / message / status），与 lib/posts.ts 一致。
  */
 
-import { AuthError, getToken, type UserDTO } from "@/lib/auth";
+import { type UserDTO } from "@/lib/auth";
+import { ApiError, apiFetch } from "@/lib/http";
 
 /** 公开资料：绝不包含 email / role / status 等私密字段。 */
 export type PublicUserDTO = {
@@ -69,7 +70,6 @@ export const PROFILE_LIMITS = {
 /* -------------------------------------------------------------------------- */
 
 /** required：无令牌直接失败；optional：有令牌就带上。 */
-type AuthMode = "required" | "optional";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -118,44 +118,8 @@ function extractError(body: unknown, status: number): { code: string; message: s
   return { code: "request_failed", message: fallbackMessage(status) };
 }
 
-async function requestJSON(path: string, init: RequestInit, auth: AuthMode): Promise<unknown> {
-  const token = getToken();
-  if (auth === "required" && !token) {
-    throw new AuthError("unauthorized", "请先登录后再继续。", 401);
-  }
-
-  const headers = new Headers(init.headers);
-  headers.set("Accept", "application/json");
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  if (init.body !== undefined) headers.set("Content-Type", "application/json");
-
-  let response: Response;
-  try {
-    response = await fetch(`/api/v1${path}`, { ...init, headers });
-  } catch {
-    throw new AuthError("network_error", "无法连接服务器，请检查网络后重试。", 0);
-  }
-
-  const text = await response.text();
-  let body: unknown = null;
-  if (text) {
-    try {
-      body = JSON.parse(text) as unknown;
-    } catch {
-      body = null;
-    }
-  }
-
-  if (!response.ok) {
-    const error = extractError(body, response.status);
-    throw new AuthError(error.code, error.message, response.status);
-  }
-
-  return body;
-}
-
-function invalidResponse(): AuthError {
-  return new AuthError("invalid_response", "服务器返回了无法识别的响应。", 0);
+function invalidResponse(): ApiError {
+  return new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);
 }
 
 function normalizePublicUser(value: unknown): PublicUserDTO | null {
@@ -188,11 +152,7 @@ function normalizePublicUser(value: unknown): PublicUserDTO | null {
 export async function getPublicUser(handle: string): Promise<PublicProfile> {
   // 令牌可选：公开接口本身不要求登录；带有效令牌时服务端返回 `following`，
   // 匿名（或令牌已过期）时不返回该字段，按未关注处理。
-  const body = await requestJSON(
-    `/users/${encodeURIComponent(handle)}`,
-    { method: "GET", cache: "no-store" },
-    "optional",
-  );
+  const body = await apiFetch(`/users/${encodeURIComponent(handle)}`, { method: "GET" });
   if (!isRecord(body)) throw invalidResponse();
 
   const user = normalizePublicUser(body.user);
@@ -251,11 +211,7 @@ export function recallFollowState(handle: string): boolean | null {
 /* -------------------------------------------------------------------------- */
 
 async function setFollow(handle: string, following: boolean): Promise<FollowResult> {
-  const body = await requestJSON(
-    `/users/${encodeURIComponent(handle)}/follow`,
-    { method: following ? "POST" : "DELETE" },
-    "required",
-  );
+  const body = await apiFetch(`/users/${encodeURIComponent(handle)}/follow`, { method: following ? "POST" : "DELETE" });
   if (!isRecord(body)) throw invalidResponse();
   return { following: body.following === true, followerCount: num(body.followerCount) };
 }
@@ -281,11 +237,7 @@ export async function unfollowUser(handle: string): Promise<FollowResult> {
  * 服务端按请求体中出现的字段更新。成功后返回完整私有 DTO。
  */
 export async function updateProfile(input: ProfileUpdateInput): Promise<UserDTO> {
-  const body = await requestJSON(
-    "/users/me",
-    { method: "PATCH", body: JSON.stringify(input) },
-    "required",
-  );
+  const body = await apiFetch("/users/me", { method: "PATCH", body: JSON.stringify(input) });
   if (!isRecord(body) || !isRecord(body.user)) throw invalidResponse();
   const user = body.user;
   if (typeof user.id !== "string" || typeof user.name !== "string") throw invalidResponse();
