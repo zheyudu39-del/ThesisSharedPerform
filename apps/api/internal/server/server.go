@@ -66,19 +66,15 @@ func New(d Deps) *http.Server {
 
 			// 论文解析：识别 DOI / arXiv 并抓取元数据，需登录（避免被匿名刷外部 API）。
 			r.Post("/papers/resolve", papers.Resolve)
-			r.Get("/papers", papers.List)
-			r.Get("/papers/{id}", papers.Get)
 
-			// 信息流与互动均要求登录，互动写操作在服务层事务中保证幂等。
+			// 信息流与互动写操作均要求登录，写操作在服务层事务中保证幂等。
 			r.Post("/posts", contents.CreatePost)
-			r.Get("/posts/{id}", contents.GetPost)
 			r.Get("/feed", contents.Feed)
 			r.Post("/posts/{id}/like", contents.Like)
 			r.Delete("/posts/{id}/like", contents.Unlike)
 			r.Post("/posts/{id}/bookmark", contents.Bookmark)
 			r.Delete("/posts/{id}/bookmark", contents.Unbookmark)
 			r.Post("/posts/{id}/comments", contents.CreateComment)
-			r.Get("/posts/{id}/comments", contents.ListComments)
 
 			// 文件上传流水线（PRD V-01~V-07 / P-05）。
 			// 对象存储不可用时（d.Storage == nil）不注册，避免出现必然失败的接口。
@@ -89,6 +85,23 @@ func New(d Deps) *http.Server {
 				r.Get("/files/{id}", files.Get)
 				r.Get("/files/{id}/pages", files.Pages)
 			}
+		})
+
+		// 公开读接口：SSR 与 SEO 的前提（PRD §7.4）。
+		//
+		// 服务端渲染时没有用户令牌，若这些路由仍挂在 Authenticate 下，渲染进程只能
+		// 拿到 401，爬虫也就只能看到空壳页面。因此它们改用 OptionalAuthenticate：
+		// 带了有效令牌照常注入 viewerID（liked/bookmarked 等个性化字段正确），
+		// 没有令牌按匿名放行，由服务层的可见性谓词只放行 public 内容。
+		//
+		// 写接口（发帖、点赞、收藏、评论、论文解析、关注、资料编辑、文件）仍然
+		// 全部留在上面的 Authenticate 组内，匿名读的开放不构成任何写权限。
+		r.Group(func(r chi.Router) {
+			r.Use(appmiddleware.OptionalAuthenticate(tokens))
+			r.Get("/papers", papers.List)
+			r.Get("/papers/{id}", papers.Get)
+			r.Get("/posts/{id}", contents.GetPost)
+			r.Get("/posts/{id}/comments", contents.ListComments)
 		})
 
 		// 公开个人主页：无需登录，供分享链接与搜索引擎抓取（PRD A-03 / §7.4）。

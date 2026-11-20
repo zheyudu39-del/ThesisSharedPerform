@@ -1,62 +1,93 @@
-"use client";
-
+import type { Metadata } from "next";
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
-import { FileUploader } from "@/components/FileUploader";
-import { PdfPreview } from "@/components/PdfPreview";
+import { notFound } from "next/navigation";
+import { PaperFileSection } from "@/components/PaperFileSection";
 import { SiteHeader } from "@/components/SiteHeader";
-import { useAuth } from "@/components/AuthProvider";
-import { getPaper, type PaperDTO } from "@/lib/papers";
-import type { FileDTO } from "@/lib/files";
+import { fetchPaper } from "@/lib/server-api";
+import { absoluteUrl, jsonLd, truncate } from "@/lib/seo";
 
 /**
- * 论文详情页。
+ * 论文详情页（Server Component，PRD §7.4）。
  *
- * 布局：
- * - 标题 / 作者 / 元数据 / 摘要（左栏，窄屏单列）；
- * - 关联了 PDF 时，正文上方给一个大尺寸内联预览（maxHeight 720），
- *   并保留「在独立页打开」入口——这里的独立页就是本页自身，所以改成
- *   锚点定位到预览区；
- * - 未关联时，登录用户可上传 PDF 作为该论文的全文。
+ * 页面骨架、标题、作者、摘要全部在服务端渲染，爬虫无需执行 JS 即可拿到正文；
+ * 交互部分（登录态下的上传、PDF 预览）拆到 {@link PaperFileSection} 客户端组件。
  *
- * 说明：本期没有「把文件挂到 Paper 上」的接口（契约明确不新增 post_attachments），
- * 因此上传成功后只在本地展示预览，并明确提示文件已上传但尚未写入 Paper。
- * 待后端补 `PATCH /papers/{id}` 或 `POST /papers/{id}/file` 后，把
- * {@link handleUploaded} 里的本地状态替换成接口调用即可。
+ * 元数据与 JSON-LD 让搜索引擎把本页识别为一篇 ScholarlyArticle。
  */
-export default function PaperDetailPage() {
-  const params = useParams<{ id: string }>();
-  const { status } = useAuth();
-  const [paper, setPaper] = useState<PaperDTO | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [localFile, setLocalFile] = useState<FileDTO | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const data = await getPaper(params.id);
-        if (!cancelled) setPaper(data);
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : "加载失败");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [params.id]);
+type PageProps = { params: Promise<{ id: string }> };
 
-  const handleUploaded = useCallback((file: FileDTO) => {
-    // 本地挂上预览，让用户立刻看到效果；刷新后是否仍关联取决于后端是否落库。
-    setLocalFile(file);
-  }, []);
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  const { id } = await params;
+  const paper = await fetchPaper(id);
 
-  const fileId = paper?.pdfFileId ?? (localFile ? localFile.id : null);
+  // 论文不存在时交给页面 notFound()；这里只给一个兜底标题。
+  if (!paper) {
+    return { title: "论文", alternates: { canonical: absoluteUrl(`/papers/${id}`) } };
+  }
+
+  const title = paper.title || "论文";
+  const description =
+    truncate(paper.abstract, 160) ||
+    `${paper.title}${paper.venue ? ` · ${paper.venue}` : ""} — 论文详情`;
+  const canonical = absoluteUrl(`/papers/${paper.id}`);
+  const authors = paper.authors.map((a) => a.name).filter(Boolean);
+
+  return {
+    title,
+    description,
+    alternates: { canonical },
+    openGraph: {
+      type: "article",
+      title,
+      description,
+      url: canonical,
+      authors: authors.length > 0 ? authors : undefined,
+      publishedTime: paper.createdAt || undefined,
+    },
+    twitter: {
+      card: "summary",
+      title,
+      description,
+    },
+  };
+}
+
+export default async function PaperDetailPage({ params }: PageProps) {
+  const { id } = await params;
+  const paper = await fetchPaper(id);
+  if (!paper) notFound();
+
+  const authorNames = paper.authors.map((a) => a.name).filter(Boolean);
+
+  // JSON-LD：ScholarlyArticle。identifier 优先 DOI，其次 arXiv / OpenReview。
+  const identifier = paper.doi
+    ? { "@type": "PropertyValue", propertyID: "DOI", value: paper.doi }
+    : paper.arxivId
+      ? { "@type": "PropertyValue", propertyID: "arXiv", value: paper.arxivId }
+      : paper.openreviewId
+        ? { "@type": "PropertyValue", propertyID: "OpenReview", value: paper.openreviewId }
+        : undefined;
+
+  const structuredData = {
+    "@context": "https://schema.org",
+    "@type": "ScholarlyArticle",
+    headline: paper.title,
+    name: paper.title,
+    abstract: paper.abstract || undefined,
+    author:
+      authorNames.length > 0
+        ? authorNames.map((name) => ({ "@type": "Person", name }))
+        : undefined,
+    // 学术出版日期优先用发表年份；没有年份才退回入库时间，避免把「入库时刻」
+    // 当成论文发表日。
+    datePublished:
+      paper.publishedYear > 0 ? String(paper.publishedYear) : paper.createdAt || undefined,
+    identifier,
+    isPartOf: paper.venue ? { "@type": "Periodical", name: paper.venue } : undefined,
+    url: absoluteUrl(`/papers/${paper.id}`),
+    ...(paper.createdAt ? { dateModified: paper.createdAt } : {}),
+  };
 
   return (
     <>
@@ -69,119 +100,70 @@ export default function PaperDetailPage() {
           ← 返回论文库
         </Link>
 
-        {loading && (
-          <div className="flex flex-col gap-4" aria-hidden>
-            <div className="h-8 w-3/4 animate-pulse rounded-[6px] bg-surface-2" />
-            <div className="h-4 w-1/2 animate-pulse rounded-[6px] bg-surface-2" />
-            <div className="h-40 animate-pulse rounded-[12px] bg-surface-2" />
-          </div>
-        )}
+        <article>
+          <p className="mb-3 font-mono text-[0.72rem] tracking-[0.16em] text-ink-3 uppercase">
+            论文 · Paper
+          </p>
+          <h1 className="mb-3 font-display text-[clamp(1.6rem,4vw,2.2rem)] leading-[1.15] font-semibold tracking-[-0.02em] text-balance">
+            {paper.title}
+          </h1>
 
-        {error && (
-          <div className="rounded-[12px] border border-line bg-surface p-6">
-            <p className="text-[0.9rem] text-ink-2">{error}</p>
-          </div>
-        )}
+          <p className="mb-4 text-[0.9rem] text-ink-2">
+            {authorNames.join(", ") || "未知作者"}
+          </p>
 
-        {paper && (
-          <article>
-            <p className="mb-3 font-mono text-[0.72rem] tracking-[0.16em] text-ink-3 uppercase">
-              论文 · Paper
-            </p>
-            <h1 className="mb-3 font-display text-[clamp(1.6rem,4vw,2.2rem)] leading-[1.15] font-semibold tracking-[-0.02em] text-balance">
-              {paper.title}
-            </h1>
-
-            <p className="mb-4 text-[0.9rem] text-ink-2">
-              {paper.authors.map((a) => a.name).join(", ") || "未知作者"}
-            </p>
-
-            <dl className="mb-7 flex flex-wrap gap-x-6 gap-y-2 border-y border-line py-3 font-mono text-[0.74rem] text-ink-3">
-              {paper.doi && (
-                <div>
-                  <dt className="inline">DOI </dt>
-                  <dd className="inline text-ink-2">{paper.doi}</dd>
-                </div>
-              )}
-              {paper.arxivId && (
-                <div>
-                  <dt className="inline">arXiv </dt>
-                  <dd className="inline text-ink-2">{paper.arxivId}</dd>
-                </div>
-              )}
-              {paper.venue && (
-                <div>
-                  <dt className="inline">出处 </dt>
-                  <dd className="inline text-ink-2">{paper.venue}</dd>
-                </div>
-              )}
-              {paper.publishedYear > 0 && (
-                <div>
-                  <dt className="inline">年份 </dt>
-                  <dd className="inline text-ink-2">{paper.publishedYear}</dd>
-                </div>
-              )}
-              {paper.citationCount > 0 && (
-                <div>
-                  <dt className="inline">引用 </dt>
-                  <dd className="inline text-ink-2 tabular-nums">{paper.citationCount}</dd>
-                </div>
-              )}
-            </dl>
-
-            {/* 全文预览 */}
-            <section id="preview" className="mb-8">
-              <h2 className="mb-2.5 font-mono text-[0.7rem] font-semibold tracking-[0.1em] text-ink-3 uppercase">
-                全文预览
-              </h2>
-
-              {fileId ? (
-                <PdfPreview
-                  key={fileId}
-                  fileId={fileId}
-                  initialFile={localFile && localFile.id === fileId ? localFile : null}
-                  maxHeight={720}
-                />
-              ) : status === "authenticated" ? (
-                <div className="rounded-[12px] border border-dashed border-line-strong bg-surface p-4">
-                  <p className="mb-3 text-[0.84rem] leading-relaxed text-ink-2">
-                    这篇论文还没有全文。上传 PDF 后即可在卡片与信息流内联预览。
-                  </p>
-                  <FileUploader
-                    onUploaded={handleUploaded}
-                    hint="PDF 最佳；Word / PPT 会先转码再预览 · 单文件 ≤ 100MB"
-                  />
-                </div>
-              ) : (
-                <p className="rounded-[12px] border border-dashed border-line-strong bg-surface px-5 py-6 text-center text-[0.86rem] text-ink-2">
-                  <Link href="/login" className="font-semibold text-seal hover:underline">
-                    登录
-                  </Link>
-                  后上传全文并预览。
-                </p>
-              )}
-
-              {localFile && !paper.pdfFileId && (
-                <p className="mt-2 rounded-[6px] border border-warn/40 bg-warn-wash px-3 py-2 text-[0.78rem] leading-relaxed text-warn">
-                  文件已上传（{localFile.originalName}），但本期还没有把文件写回论文记录的接口，
-                  因此刷新后需要重新上传。
-                </p>
-              )}
-            </section>
-
-            {paper.abstract ? (
-              <section>
-                <h2 className="mb-2.5 font-mono text-[0.7rem] font-semibold tracking-[0.1em] text-ink-3 uppercase">
-                  摘要
-                </h2>
-                <p className="text-[0.95rem] leading-[1.75] text-ink-2">{paper.abstract}</p>
-              </section>
-            ) : (
-              <p className="text-[0.88rem] text-ink-3">该论文暂无摘要。</p>
+          <dl className="mb-7 flex flex-wrap gap-x-6 gap-y-2 border-y border-line py-3 font-mono text-[0.74rem] text-ink-3">
+            {paper.doi && (
+              <div>
+                <dt className="inline">DOI </dt>
+                <dd className="inline text-ink-2">{paper.doi}</dd>
+              </div>
             )}
-          </article>
-        )}
+            {paper.arxivId && (
+              <div>
+                <dt className="inline">arXiv </dt>
+                <dd className="inline text-ink-2">{paper.arxivId}</dd>
+              </div>
+            )}
+            {paper.venue && (
+              <div>
+                <dt className="inline">出处 </dt>
+                <dd className="inline text-ink-2">{paper.venue}</dd>
+              </div>
+            )}
+            {paper.publishedYear > 0 && (
+              <div>
+                <dt className="inline">年份 </dt>
+                <dd className="inline text-ink-2">{paper.publishedYear}</dd>
+              </div>
+            )}
+            {paper.citationCount > 0 && (
+              <div>
+                <dt className="inline">引用 </dt>
+                <dd className="inline text-ink-2 tabular-nums">{paper.citationCount}</dd>
+              </div>
+            )}
+          </dl>
+
+          <PaperFileSection pdfFileId={paper.pdfFileId} />
+
+          {paper.abstract ? (
+            <section>
+              <h2 className="mb-2.5 font-mono text-[0.7rem] font-semibold tracking-[0.1em] text-ink-3 uppercase">
+                摘要
+              </h2>
+              <p className="text-[0.95rem] leading-[1.75] text-ink-2">{paper.abstract}</p>
+            </section>
+          ) : (
+            <p className="text-[0.88rem] text-ink-3">该论文暂无摘要。</p>
+          )}
+        </article>
       </main>
+
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={jsonLd(structuredData)}
+      />
     </>
   );
 }

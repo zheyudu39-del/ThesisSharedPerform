@@ -135,8 +135,10 @@ func (h *ContentHandler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"comment": comment})
 }
 
+// ListComments 处理 GET /api/v1/posts/{id}/comments。
+// 公开读接口：匿名访问按 uuid.Nil 查看者处理，服务层只放行 public 帖子的评论。
 func (h *ContentHandler) ListComments(w http.ResponseWriter, r *http.Request) {
-	userID, postID, ok := h.userAndPost(w, r)
+	postID, ok := postIDFromPath(w, r)
 	if !ok {
 		return
 	}
@@ -144,7 +146,7 @@ func (h *ContentHandler) ListComments(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result, err := h.service.ListComments(r.Context(), userID, postID, r.URL.Query().Get("cursor"), limit)
+	result, err := h.service.ListComments(r.Context(), viewerID(r), postID, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		writeContentError(w, err)
 		return
@@ -154,12 +156,13 @@ func (h *ContentHandler) ListComments(w http.ResponseWriter, r *http.Request) {
 
 // GetPost 处理 GET /api/v1/posts/{id}。
 // 帖子不存在与无权查看返回完全相同的 404，避免通过响应差异探测私密帖。
+// 匿名访问按 uuid.Nil 查看者处理，服务层只返回 public 帖。
 func (h *ContentHandler) GetPost(w http.ResponseWriter, r *http.Request) {
-	userID, postID, ok := h.userAndPost(w, r)
+	postID, ok := postIDFromPath(w, r)
 	if !ok {
 		return
 	}
-	post, err := h.service.GetPost(r.Context(), userID, postID)
+	post, err := h.service.GetPost(r.Context(), viewerID(r), postID)
 	if err != nil {
 		writeContentError(w, err)
 		return
@@ -167,15 +170,37 @@ func (h *ContentHandler) GetPost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"post": post})
 }
 
+// viewerID 返回当前查看者，匿名访问返回 uuid.Nil。
+//
+// 公开读路由挂在 OptionalAuthenticate 下，缺少令牌是正常路径而非错误：
+// 服务层把 uuid.Nil 编码成 SQL NULL，可见性谓词于是只剩 visibility = 'public'。
+func viewerID(r *http.Request) uuid.UUID {
+	userID, ok := appmiddleware.UserID(r.Context())
+	if !ok {
+		return uuid.Nil
+	}
+	return userID
+}
+
+// postIDFromPath 解析路径中的帖子 ID。
+func postIDFromPath(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	postID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		WriteError(w, http.StatusUnprocessableEntity, "validation_error", "帖子 ID 格式不正确")
+		return uuid.Nil, false
+	}
+	return postID, true
+}
+
+// userAndPost 用于仍需登录的写接口：缺少令牌直接 401。
 func (h *ContentHandler) userAndPost(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
 	userID, ok := appmiddleware.UserID(r.Context())
 	if !ok {
 		WriteError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
 		return uuid.Nil, uuid.Nil, false
 	}
-	postID, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		WriteError(w, http.StatusUnprocessableEntity, "validation_error", "帖子 ID 格式不正确")
+	postID, ok := postIDFromPath(w, r)
+	if !ok {
 		return uuid.Nil, uuid.Nil, false
 	}
 	return userID, postID, true

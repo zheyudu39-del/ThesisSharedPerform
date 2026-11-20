@@ -26,7 +26,7 @@ func TestTokenIssueAndParse(t *testing.T) {
 	var claims jwt.RegisteredClaims
 	_, err = jwt.ParseWithClaims(tokenString, &claims, func(*jwt.Token) (any, error) {
 		return []byte("test-secret"), nil
-	})
+	}, jwt.WithTimeFunc(manager.now))
 	if err != nil {
 		t.Fatal(err)
 	}

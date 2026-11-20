@@ -1,633 +1,114 @@
-"use client";
-
+import type { Metadata } from "next";
 import Link from "next/link";
-import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { useAuth } from "@/components/AuthProvider";
-import { PostCard } from "@/components/PostCard";
-import { PostComposer } from "@/components/PostComposer";
+import { notFound } from "next/navigation";
+import { CommentThread } from "@/components/CommentThread";
+import { PostDetailCard } from "@/components/PostDetailCard";
+import { CommentCount, PostComments } from "@/components/PostComments";
+import { PostRepostPrompt } from "@/components/PostRepostPrompt";
 import { SiteHeader } from "@/components/SiteHeader";
-import { AuthError } from "@/lib/auth";
-import {
-  createComment,
-  formatRelativeTime,
-  getComments,
-  getPost,
-  recallPost,
-  rememberPost,
-  type CommentDTO,
-  type PostDTO,
-} from "@/lib/posts";
+import { fetchComments, fetchPost } from "@/lib/server-api";
+import { absoluteUrl, truncate } from "@/lib/seo";
 
 /**
- * 帖子详情页：正文（复用 PostCard，互动一致）+ 转发框 + 评论区。
+ * 帖子详情页（Server Component，PRD §7.4）。
  *
- * 数据来源：优先调用 `GET /posts/{id}`（令牌可选），这样冷启动直接打开分享链接
- * 也能正常渲染；只有接口失败时才回退到 PostCard 写入的会话内快照，并明确提示。
+ * - 正文由 {@link PostDetailCard} 直出（它内部用 PostCard 渲染，首屏随 SSR 输出）；
+ * - 评论列表在服务端拉取并渲染，爬虫能读到讨论内容；
+ * - 发表评论、「加载更多」、转发框是客户端交互
+ *   （{@link PostComments} / {@link PostRepostPrompt}）。
  *
- * 评论区结构：一级评论平铺；带 parentId 的回复缩进显示在其父评论下方。
- * 匿名用户可浏览评论，但发表评论需要登录。
+ * 公开读接口允许匿名访问；私密帖与不存在的帖子都返回 404，这里统一 notFound()。
  */
 
-const MAX_COMMENT = 2000;
+type PageProps = {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ repost?: string | string[] }>;
+};
 
-type CommentNode = { comment: CommentDTO; replies: CommentDTO[] };
+export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
+  const { id } = await params;
+  const post = await fetchPost(id);
+  const canonical = absoluteUrl(`/posts/${id}`);
 
-/** 把扁平评论列表组织成「一级 + 回复」两层结构（更深层回复归入其根评论）。 */
-function groupComments(list: CommentDTO[]): CommentNode[] {
-  const byId = new Map(list.map((c) => [c.id, c]));
-
-  // 沿 parentId 向上找到根评论 id；缺失父评论或成环时把自身当作根。
-  function rootIdOf(comment: CommentDTO): string {
-    const visited = new Set<string>([comment.id]);
-    let current = comment;
-    while (current.parentId) {
-      const parent = byId.get(current.parentId);
-      if (!parent || visited.has(parent.id)) return current.id;
-      visited.add(parent.id);
-      current = parent;
-    }
-    return current.id;
+  if (!post) {
+    return { title: "帖子", alternates: { canonical }, robots: { index: false } };
   }
 
-  const roots: CommentNode[] = [];
-  const index = new Map<string, CommentNode>();
+  const title = truncate(post.contentText, 50) || "帖子";
+  const description =
+    truncate(post.contentText, 160) ||
+    (post.paper
+      ? `${post.author.name} 分享的论文：${post.paper.title}`
+      : `${post.author.name} 的帖子`);
 
-  for (const c of list) {
-    if (rootIdOf(c) !== c.id) continue;
-    const node: CommentNode = { comment: c, replies: [] };
-    roots.push(node);
-    index.set(c.id, node);
-  }
-
-  for (const c of list) {
-    const root = index.get(rootIdOf(c));
-    if (root && root.comment.id !== c.id) root.replies.push(c);
-  }
-
-  return roots;
+  return {
+    title,
+    description,
+    alternates: { canonical },
+    openGraph: {
+      type: "article",
+      title,
+      description,
+      url: canonical,
+      publishedTime: post.createdAt || undefined,
+      authors: post.author.name ? [post.author.name] : undefined,
+    },
+    twitter: { card: "summary", title, description },
+  };
 }
 
-export default function PostDetailPage() {
+export default async function PostDetailPage({ params, searchParams }: PageProps) {
+  const { id } = await params;
+  const [post, comments] = await Promise.all([fetchPost(id), fetchComments(id, 20)]);
+  if (!post) notFound();
+
+  const wantsRepost = (await searchParams).repost === "1";
+  const initialComments = comments?.comments ?? [];
+
   return (
     <>
       <SiteHeader />
-      {/* useSearchParams 需要 Suspense 边界，否则整页退化为动态渲染。 */}
-      <Suspense fallback={<PageFallback />}>
-        <PostDetail />
-      </Suspense>
-    </>
-  );
-}
-
-function PostDetail() {
-  const params = useParams<{ id: string }>();
-  const postId = params.id;
-  const searchParams = useSearchParams();
-  const router = useRouter();
-  const { status } = useAuth();
-
-  const wantsRepost = searchParams.get("repost") === "1";
-
-  const [post, setPost] = useState<PostDTO | null>(null);
-  const [postLoading, setPostLoading] = useState(true);
-  const [postError, setPostError] = useState<{ message: string; notFound: boolean } | null>(null);
-  const [authRequired, setAuthRequired] = useState(false);
-  const [fromSnapshot, setFromSnapshot] = useState(false);
-  const [reposted, setReposted] = useState(false);
-
-  const [comments, setComments] = useState<CommentDTO[]>([]);
-  const [commentsCursor, setCommentsCursor] = useState<string | null>(null);
-  const [commentsLoading, setCommentsLoading] = useState(true);
-  const [commentsMoreLoading, setCommentsMoreLoading] = useState(false);
-  const [commentsError, setCommentsError] = useState<string | null>(null);
-  const [commentsAuthRequired, setCommentsAuthRequired] = useState(false);
-
-  const requestId = useRef(0);
-
-  const loadPost = useCallback(async () => {
-    const id = ++requestId.current;
-    setPostError(null);
-    setAuthRequired(false);
-    setFromSnapshot(false);
-    setPostLoading(true);
-
-    try {
-      const data = await getPost(postId);
-      if (id !== requestId.current) return;
-      setPost(data);
-      rememberPost(data);
-    } catch (err) {
-      if (id !== requestId.current) return;
-
-      // 帖子详情在后端要求登录：401 时若有本会话快照仍可展示，否则给登录引导。
-      if (err instanceof AuthError && err.status === 401) {
-        const cached = recallPost(postId);
-        if (cached) {
-          setPost(cached);
-          setFromSnapshot(true);
-        } else {
-          setPost(null);
-          setAuthRequired(true);
-        }
-        return;
-      }
-
-      // 接口不可用（含后端尚未上线该路由的 404）：回退到会话内快照。
-      const cached = recallPost(postId);
-      if (cached) {
-        setPost(cached);
-        setFromSnapshot(true);
-        return;
-      }
-
-      setPost(null);
-      // 只有契约里的 post_not_found 才算「确定不存在」；路由未上线等 404
-      // （code 不是 post_not_found）仍可重试。
-      const notFound =
-        err instanceof AuthError && err.status === 404 && err.code === "post_not_found";
-      setPostError({
-        notFound,
-        message: notFound
-          ? "这个帖子不存在，或你无权查看。"
-          : err instanceof AuthError
-            ? err.message
-            : "帖子加载失败，请稍后重试。",
-      });
-    } finally {
-      if (id === requestId.current) setPostLoading(false);
-    }
-  }, [postId]);
-
-  function patchPost(next: PostDTO) {
-    setPost(next);
-    rememberPost(next);
-  }
-
-  const loadComments = useCallback(async () => {
-    setCommentsLoading(true);
-    setCommentsError(null);
-    setCommentsAuthRequired(false);
-    setComments([]);
-    setCommentsCursor(null);
-    try {
-      const page = await getComments(postId, null, 20);
-      setComments(page.comments);
-      setCommentsCursor(page.nextCursor);
-    } catch (err) {
-      // 后端评论列表也要求登录：401 单独引导，不算「加载失败」。
-      if (err instanceof AuthError && err.status === 401) {
-        setCommentsAuthRequired(true);
-      } else {
-        setCommentsError(err instanceof AuthError ? err.message : "评论加载失败，请稍后重试。");
-      }
-    } finally {
-      setCommentsLoading(false);
-    }
-  }, [postId]);
-
-  useEffect(() => {
-    void loadPost();
-    void loadComments();
-  }, [loadPost, loadComments]);
-
-  // 登录完成后（例如从登录页回跳）重新取一次：首次请求可能因无令牌被拒。
-  useEffect(() => {
-    if (status !== "authenticated" || !authRequired) return;
-    void loadPost();
-    void loadComments();
-  }, [status, authRequired, loadPost, loadComments]);
-
-  async function loadMoreComments() {
-    if (!commentsCursor || commentsMoreLoading || commentsLoading) return;
-    setCommentsMoreLoading(true);
-    setCommentsError(null);
-    try {
-      const page = await getComments(postId, commentsCursor, 20);
-      setComments((prev) => {
-        const seen = new Set(prev.map((c) => c.id));
-        return [...prev, ...page.comments.filter((c) => !seen.has(c.id))];
-      });
-      setCommentsCursor(page.nextCursor);
-    } catch (err) {
-      setCommentsError(err instanceof AuthError ? err.message : "加载更多评论失败，请重试。");
-    } finally {
-      setCommentsMoreLoading(false);
-    }
-  }
-
-  function handleCommentCreated(comment: CommentDTO) {
-    setComments((prev) => (prev.some((c) => c.id === comment.id) ? prev : [...prev, comment]));
-    setPost((prev) => {
-      if (!prev) return prev;
-      const next = { ...prev, commentCount: prev.commentCount + 1 };
-      rememberPost(next);
-      return next;
-    });
-  }
-
-  function handleReposted() {
-    setReposted(true);
-    setPost((prev) => {
-      if (!prev) return prev;
-      const next = { ...prev, repostCount: prev.repostCount + 1 };
-      rememberPost(next);
-      return next;
-    });
-    // 清掉 ?repost=1，避免刷新后再次弹出转发框。
-    router.replace(`/posts/${postId}`);
-  }
-
-  return (
-    <main className="mx-auto w-full max-w-3xl px-5 py-10">
-      <Link
-        href="/"
-        className="mb-6 inline-flex items-center gap-1.5 text-[0.82rem] text-ink-2 hover:text-ink"
-      >
-        ← 返回信息流
-      </Link>
-
-      {postLoading && <PostSkeleton />}
-
-      {!postLoading && authRequired && (
-        <div className="rounded-[12px] border border-line bg-surface p-6 text-center shadow-[var(--shadow-1)]">
-          <p className="mb-1.5 font-mono text-[0.68rem] tracking-[0.12em] text-ink-3 uppercase">
-            需要登录 · Sign in
-          </p>
-          <p className="text-[0.9rem] leading-relaxed text-ink-2">
-            帖子详情需要登录后查看。登录后即可继续阅读与参与讨论。
-          </p>
-          <Link
-            href={`/login?next=${encodeURIComponent(`/posts/${postId}`)}`}
-            className="mt-4 inline-block rounded-[6px] bg-seal px-4 py-1.5 text-[0.85rem] font-semibold text-white hover:bg-seal-deep"
-          >
-            登录
-          </Link>
-        </div>
-      )}
-
-      {!postLoading && postError && (
-        <div className="rounded-[12px] border border-line bg-surface p-6 text-center">
-          <p className="font-mono text-[0.68rem] tracking-[0.12em] text-danger uppercase">
-            {postError.notFound ? "帖子不可用" : "加载失败"}
-          </p>
-          <p className="mt-2 text-[0.88rem] leading-relaxed text-ink-2">{postError.message}</p>
-          {postError.notFound ? (
-            <Link
-              href="/"
-              className="mt-4 inline-block rounded-[6px] border border-line-strong px-4 py-1.5 text-[0.85rem] font-semibold text-ink hover:border-ink-3"
-            >
-              返回信息流
-            </Link>
-          ) : (
-            // 非 404 时才提供重试；404 是确定性结果，重试没有意义。
-            <button
-              type="button"
-              onClick={() => void loadPost()}
-              className="mt-4 rounded-[6px] border border-line-strong px-4 py-1.5 text-[0.85rem] font-semibold text-ink hover:border-ink-3"
-            >
-              重试
-            </button>
-          )}
-        </div>
-      )}
-
-      {post && (
-        <>
-          {fromSnapshot && (
-            <p className="mb-4 rounded-[6px] border border-warn/40 bg-warn-wash px-3 py-2 text-[0.8rem] leading-relaxed text-warn">
-              最新数据暂时无法获取，当前显示的是本会话中的缓存快照。
-            </p>
-          )}
-
-          {wantsRepost && status === "authenticated" && !reposted && (
-            <div className="mb-4">
-              <PostComposer
-                repostOf={post.id}
-                repostLabel={`@${post.author.handle} 的帖子`}
-                onCreated={handleReposted}
-                autoFocus
-              />
-            </div>
-          )}
-
-          {reposted && (
-            <p
-              role="status"
-              className="mb-4 rounded-[6px] border border-good/40 bg-good-wash px-3 py-2 text-[0.82rem] text-good"
-            >
-              已转发。去你的主页或关注流看看。
-            </p>
-          )}
-
-          {wantsRepost && status === "anonymous" && (
-            <p className="mb-4 rounded-[12px] border border-dashed border-line-strong bg-surface px-4 py-4 text-center text-[0.86rem] text-ink-2">
-              <Link href={`/login?next=${encodeURIComponent(`/posts/${postId}?repost=1`)}`} className="font-semibold text-seal hover:underline">
-                登录
-              </Link>
-              后才能转发。
-            </p>
-          )}
-
-          <PostCard post={post} detail onPatch={patchPost} />
-
-          <section id="comments" className="mt-8 scroll-mt-24">
-            <h2 className="mb-4 flex items-baseline gap-2 border-b border-line pb-2.5">
-              <span className="font-display text-[1.15rem] font-semibold">评论</span>
-              <span className="font-mono text-[0.75rem] tabular-nums text-ink-3">
-                {post.commentCount}
-              </span>
-            </h2>
-
-            <CommentComposer postId={post.id} onCreated={handleCommentCreated} />
-
-            {commentsLoading && <CommentSkeleton />}
-
-            {!commentsLoading && commentsAuthRequired && (
-              <p className="mt-4 rounded-[12px] border border-dashed border-line-strong bg-surface px-5 py-6 text-center text-[0.86rem] text-ink-2">
-                <Link href="/login" className="font-semibold text-seal hover:underline">
-                  登录
-                </Link>
-                后查看评论。
-              </p>
-            )}
-
-            {!commentsLoading && !commentsAuthRequired && commentsError && !comments.length && (
-              <div className="mt-4 rounded-[12px] border border-line bg-surface p-5 text-center">
-                <p className="text-[0.86rem] text-ink-2">{commentsError}</p>
-                <button
-                  type="button"
-                  onClick={() => void loadComments()}
-                  className="mt-3 rounded-[6px] border border-line-strong px-4 py-1.5 text-[0.82rem] font-semibold text-ink hover:border-ink-3"
-                >
-                  重试
-                </button>
-              </div>
-            )}
-
-            {!commentsLoading &&
-              !commentsAuthRequired &&
-              !commentsError &&
-              comments.length === 0 && (
-                <p className="mt-4 rounded-[12px] border border-dashed border-line-strong bg-surface px-5 py-8 text-center text-[0.86rem] text-ink-2">
-                  还没有评论。写下你的第一条判断。
-                </p>
-              )}
-
-            {comments.length > 0 && (
-              <ul className="mt-4 flex flex-col gap-3">
-                {groupComments(comments).map((node) => (
-                  <li key={node.comment.id}>
-                    <CommentItem comment={node.comment} />
-                    {node.replies.length > 0 && (
-                      <ul className="mt-2 ml-4 flex flex-col gap-2 border-l border-line pl-3.5">
-                        {node.replies.map((reply) => (
-                          <li key={reply.id}>
-                            <CommentItem comment={reply} compact />
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            {commentsCursor && (
-              <div className="mt-4 flex justify-center">
-                <button
-                  type="button"
-                  onClick={() => void loadMoreComments()}
-                  disabled={commentsMoreLoading}
-                  aria-busy={commentsMoreLoading}
-                  className="inline-flex items-center gap-2 rounded-[6px] border border-line-strong bg-surface px-4 py-1.5 text-[0.82rem] font-semibold text-ink hover:border-ink-3 disabled:opacity-60"
-                >
-                  {commentsMoreLoading && (
-                    <span
-                      aria-hidden
-                      className="size-3 animate-spin rounded-full border-2 border-ink-3/40 border-t-ink"
-                    />
-                  )}
-                  {commentsMoreLoading ? "加载中…" : "加载更多评论"}
-                </button>
-              </div>
-            )}
-
-            {commentsError && comments.length > 0 && (
-              <p role="alert" className="mt-3 text-center text-[0.8rem] text-danger">
-                {commentsError}
-              </p>
-            )}
-          </section>
-        </>
-      )}
-    </main>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* 评论                                                                        */
-/* -------------------------------------------------------------------------- */
-
-function CommentComposer({
-  postId,
-  onCreated,
-}: {
-  postId: string;
-  onCreated: (comment: CommentDTO) => void;
-}) {
-  const { status } = useAuth();
-  const [content, setContent] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const length = [...content].length;
-  const tooLong = length > MAX_COMMENT;
-
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (submitting) return;
-
-    const trimmed = content.trim();
-    if (!trimmed) {
-      setError("评论不能为空。");
-      return;
-    }
-    if (tooLong) {
-      setError(`评论最多 ${MAX_COMMENT} 个字符。`);
-      return;
-    }
-
-    setSubmitting(true);
-    setError(null);
-    try {
-      const comment = await createComment(postId, { content: trimmed });
-      setContent("");
-      onCreated(comment);
-    } catch (err) {
-      setError(err instanceof AuthError ? err.message : "评论失败，请稍后重试。");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  if (status === "loading") {
-    return <div className="h-24 animate-pulse rounded-[12px] bg-surface-2" aria-hidden />;
-  }
-
-  if (status === "anonymous") {
-    return (
-      <div className="rounded-[12px] border border-dashed border-line-strong bg-surface px-4 py-4 text-center">
-        <p className="text-[0.86rem] text-ink-2">
-          <Link href="/login" className="font-semibold text-seal hover:underline">
-            登录
-          </Link>
-          后参与讨论。
-        </p>
-      </div>
-    );
-  }
-
-  return (
-    <form
-      onSubmit={handleSubmit}
-      className="rounded-[12px] border border-line bg-surface p-3.5 shadow-[var(--shadow-1)]"
-    >
-      <label htmlFor="comment-content" className="sr-only">
-        评论内容
-      </label>
-      <textarea
-        id="comment-content"
-        value={content}
-        onChange={(e) => {
-          setContent(e.target.value);
-          if (error) setError(null);
-        }}
-        rows={3}
-        placeholder="写下你的判断，或指出值得讨论的地方……"
-        className="w-full resize-y rounded-[6px] border border-line-strong bg-surface px-3 py-2 text-[0.9rem] leading-relaxed text-ink placeholder:text-ink-3 focus:border-seal focus:outline-none"
-      />
-
-      <div className="mt-2 flex items-center gap-3">
-        <span
-          className={`font-mono text-[0.7rem] tabular-nums ${tooLong ? "text-danger" : "text-ink-3"}`}
-        >
-          {length} / {MAX_COMMENT}
-        </span>
-        <button
-          type="submit"
-          disabled={submitting || tooLong || content.trim().length === 0}
-          aria-busy={submitting}
-          className="ml-auto inline-flex items-center gap-2 rounded-[6px] bg-seal px-4 py-1.5 text-[0.85rem] font-semibold text-white transition-colors hover:bg-seal-deep disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {submitting && (
-            <span
-              aria-hidden
-              className="size-3 animate-spin rounded-full border-2 border-white/35 border-t-white"
-            />
-          )}
-          {submitting ? "发送中…" : "发表评论"}
-        </button>
-      </div>
-
-      {error && (
-        <p role="alert" className="mt-2 text-[0.8rem] text-danger">
-          {error}
-        </p>
-      )}
-    </form>
-  );
-}
-
-function CommentItem({ comment, compact = false }: { comment: CommentDTO; compact?: boolean }) {
-  const initial = [...comment.author.name][0] ?? "?";
-  const hasHtml = comment.contentHtml.trim().length > 0;
-
-  return (
-    <article
-      className={`rounded-[12px] border border-line bg-surface ${
-        compact ? "px-3 py-2.5" : "p-3.5"
-      } shadow-[var(--shadow-1)]`}
-    >
-      <div className="mb-1.5 flex items-center gap-2">
-        <span
-          className={`grid shrink-0 place-items-center rounded-full bg-ink font-display text-paper ${
-            compact ? "size-5 text-[10px]" : "size-6 text-[11px]"
-          }`}
-          aria-hidden
-        >
-          {initial}
-        </span>
+      <main className="mx-auto w-full max-w-3xl px-5 py-10">
         <Link
-          href={`/u/${encodeURIComponent(comment.author.handle)}`}
-          className="truncate text-[0.84rem] font-semibold hover:underline"
+          href="/"
+          className="mb-6 inline-flex items-center gap-1.5 text-[0.82rem] text-ink-2 hover:text-ink"
         >
-          {comment.author.name}
+          ← 返回信息流
         </Link>
-        <span className="font-mono text-[0.7rem] text-ink-3">
-          @{comment.author.handle}
-        </span>
-        <time
-          dateTime={comment.createdAt}
-          className="ml-auto shrink-0 font-mono text-[0.7rem] text-ink-3"
-        >
-          {formatRelativeTime(comment.createdAt)}
-        </time>
-      </div>
 
-      {hasHtml ? (
-        <div
-          className="text-[0.88rem] leading-relaxed break-words text-ink-2 [&_a]:text-seal [&_a]:underline [&_code]:rounded-[3px] [&_code]:bg-surface-2 [&_code]:px-1 [&_code]:font-mono [&_p]:mb-1.5 [&_p:last-child]:mb-0"
-          dangerouslySetInnerHTML={{ __html: comment.contentHtml }}
-        />
-      ) : (
-        <p className="text-[0.88rem] leading-relaxed break-words whitespace-pre-wrap text-ink-2">
-          {comment.contentText}
-        </p>
-      )}
-    </article>
-  );
-}
+        {wantsRepost && (
+          <PostRepostPrompt postId={post.id} authorHandle={post.author.handle} />
+        )}
 
-/* -------------------------------------------------------------------------- */
-/* 骨架                                                                        */
-/* -------------------------------------------------------------------------- */
+        <PostDetailCard post={post} />
 
-function PageFallback() {
-  return (
-    <main className="mx-auto w-full max-w-3xl px-5 py-10">
-      <PostSkeleton />
-    </main>
-  );
-}
+        <section id="comments" className="mt-8 scroll-mt-24">
+          <h2 className="mb-4 flex items-baseline gap-2 border-b border-line pb-2.5">
+            <span className="font-display text-[1.15rem] font-semibold">评论</span>
+            <span className="font-mono text-[0.75rem] tabular-nums text-ink-3">
+              <CommentCount postId={post.id} initial={post.commentCount} />
+            </span>
+          </h2>
 
-function PostSkeleton() {
-  return (
-    <div className="rounded-[12px] border border-line bg-surface p-4 shadow-[var(--shadow-1)]" aria-hidden>
-      <div className="mb-3 flex items-center gap-2.5">
-        <div className="size-[34px] animate-pulse rounded-full bg-surface-2" />
-        <div className="flex-1">
-          <div className="mb-1.5 h-3 w-28 animate-pulse rounded-[3px] bg-surface-2" />
-          <div className="h-2.5 w-40 animate-pulse rounded-[3px] bg-surface-2" />
-        </div>
-      </div>
-      <div className="mb-2 h-3 w-full animate-pulse rounded-[3px] bg-surface-2" />
-      <div className="mb-2 h-3 w-11/12 animate-pulse rounded-[3px] bg-surface-2" />
-      <div className="mb-3 h-3 w-2/3 animate-pulse rounded-[3px] bg-surface-2" />
-      <div className="h-24 w-full animate-pulse rounded-[6px] bg-surface-2" />
-    </div>
-  );
-}
+          {/* 首屏评论：服务端直出，爬虫可见。 */}
+          {initialComments.length > 0 ? (
+            <CommentThread comments={initialComments} />
+          ) : comments ? (
+            <p className="mt-4 rounded-[12px] border border-dashed border-line-strong bg-surface px-5 py-8 text-center text-[0.86rem] text-ink-2">
+              还没有评论。写下你的第一条判断。
+            </p>
+          ) : null}
 
-function CommentSkeleton() {
-  return (
-    <div className="mt-4 flex flex-col gap-2.5" aria-hidden>
-      {[0, 1, 2].map((i) => (
-        <div key={i} className="rounded-[12px] border border-line bg-surface p-3.5">
-          <div className="mb-2 h-2.5 w-24 animate-pulse rounded-[3px] bg-surface-2" />
-          <div className="h-3 w-full animate-pulse rounded-[3px] bg-surface-2" />
-        </div>
-      ))}
-    </div>
+          {/* 评论框、加载更多、新评论插入。 */}
+          <div className="mt-4">
+            <PostComments
+              postId={post.id}
+              initialNextCursor={comments?.nextCursor ?? null}
+              commentsAvailable={comments !== null}
+            />
+          </div>
+        </section>
+      </main>
+    </>
   );
 }

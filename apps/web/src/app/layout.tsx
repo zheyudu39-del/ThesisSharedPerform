@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Fraunces, Inter, IBM_Plex_Mono } from "next/font/google";
 import { AuthProvider } from "@/components/AuthProvider";
+import { SITE_URL } from "@/lib/seo";
 import "./globals.css";
 
 const fraunces = Fraunces({
@@ -24,11 +25,18 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
+  // 让各页相对 canonical / Open Graph 地址解析为绝对地址。
+  metadataBase: new URL(SITE_URL),
   title: {
     default: "Thesis Shared · 学术论文社区",
     template: "%s · Thesis Shared",
   },
   description: "以人的判断筛选前沿论文，从共读文献到共同成稿的一体化协作空间。",
+  openGraph: {
+    type: "website",
+    siteName: "Thesis Shared",
+    locale: "zh_CN",
+  },
 };
 
 export const viewport: Viewport = {

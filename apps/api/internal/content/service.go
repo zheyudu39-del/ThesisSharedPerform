@@ -102,12 +102,26 @@ type CommentsResult struct {
 	NextCursor *string   `json:"nextCursor"`
 }
 
-// Service 实现内容领域逻辑；pgx 连接池天然支持多请求并发。
-type Service struct {
-	pool *pgxpool.Pool
+// readQuerier 是公开读路径（帖子详情、评论列表）用到的最小查询集合。
+// 单独抽出是为了让「匿名查看者 = uuid.Nil」的映射能在没有数据库的单元测试里验证。
+type readQuerier interface {
+	GetPostByID(context.Context, db.GetPostByIDParams) (db.GetPostByIDRow, error)
+	GetPostForWrite(context.Context, db.GetPostForWriteParams) (pgtype.UUID, error)
+	ListComments(context.Context, db.ListCommentsParams) ([]db.ListCommentsRow, error)
 }
 
-func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool} }
+// Service 实现内容领域逻辑；pgx 连接池天然支持多请求并发。
+type Service struct {
+	pool    *pgxpool.Pool
+	queries readQuerier
+}
+
+func NewService(pool *pgxpool.Pool) *Service {
+	return &Service{pool: pool, queries: db.New(pool)}
+}
+
+// newServiceWithQuerier 用于测试注入替身；写路径仍需 pool，故只覆盖读路径。
+func newServiceWithQuerier(queries readQuerier) *Service { return &Service{queries: queries} }
 
 func uuidParam(id uuid.UUID) pgtype.UUID { return pgtype.UUID{Bytes: id, Valid: id != uuid.Nil} }
 func optionalUUID(id *uuid.UUID) pgtype.UUID {
@@ -236,8 +250,13 @@ func (s *Service) CreatePost(ctx context.Context, authorID uuid.UUID, input Crea
 // GetPost 返回单条帖子详情。
 // 帖子不存在与当前用户无权查看返回同一个 ErrPostNotFound，
 // 使调用方无法通过响应差异探测私密帖是否存在。
+//
+// userID 为 uuid.Nil 表示匿名访问：uuidParam 会把零值编码成 SQL NULL，
+// 可见性谓词里的 `p.author_id = NULL`、`follows.follower_id = NULL` 等比较均为
+// UNKNOWN，只有 `p.visibility = 'public'` 能成立，因此匿名只可能读到 public 帖。
+// 这与「匿名访问不返回 401」的公开读契约一致，且不依赖调用方额外过滤。
 func (s *Service) GetPost(ctx context.Context, userID, postID uuid.UUID) (Post, error) {
-	row, err := db.New(s.pool).GetPostByID(ctx, db.GetPostByIDParams{ID: uuidParam(postID), UserID: uuidParam(userID)})
+	row, err := s.queries.GetPostByID(ctx, db.GetPostByIDParams{ID: uuidParam(postID), UserID: uuidParam(userID)})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Post{}, ErrPostNotFound
 	}
@@ -451,6 +470,12 @@ func (s *Service) CreateComment(ctx context.Context, userID, postID uuid.UUID, c
 	return toComment(row), nil
 }
 
+// ListComments 返回帖子的评论列表。
+//
+// userID 为 uuid.Nil 表示匿名访问。先做的可读性校验复用了与写路径相同的可见性
+// 谓词（GetPostForWrite）：它的条件是「本人 / public / 已关注作者的 followers /
+// 群成员」，传入 NULL 查看者时只剩 public 成立，因此匿名只能看到 public 帖的评论，
+// 私密帖与不存在的帖子一样返回 ErrPostNotFound。
 func (s *Service) ListComments(ctx context.Context, userID, postID uuid.UUID, rawCursor string, limit int32) (CommentsResult, error) {
 	if limit <= 0 {
 		limit = 20
@@ -462,14 +487,13 @@ func (s *Service) ListComments(ctx context.Context, userID, postID uuid.UUID, ra
 	if err != nil {
 		return CommentsResult{}, err
 	}
-	q := db.New(s.pool)
-	if _, err := q.GetPostForWrite(ctx, db.GetPostForWriteParams{ID: uuidParam(postID), AuthorID: uuidParam(userID)}); errors.Is(err, pgx.ErrNoRows) {
+	if _, err := s.queries.GetPostForWrite(ctx, db.GetPostForWriteParams{ID: uuidParam(postID), AuthorID: uuidParam(userID)}); errors.Is(err, pgx.ErrNoRows) {
 		return CommentsResult{}, ErrPostNotFound
 	} else if err != nil {
 		return CommentsResult{}, err
 	}
 	timeCursor := pgtype.Timestamptz{Time: createdAt, Valid: rawCursor != ""}
-	rows, err := q.ListComments(ctx, db.ListCommentsParams{PostID: uuidParam(postID), Column2: timeCursor, Column3: uuidParam(id), Limit: limit + 1})
+	rows, err := s.queries.ListComments(ctx, db.ListCommentsParams{PostID: uuidParam(postID), Column2: timeCursor, Column3: uuidParam(id), Limit: limit + 1})
 	if err != nil {
 		return CommentsResult{}, err
 	}
