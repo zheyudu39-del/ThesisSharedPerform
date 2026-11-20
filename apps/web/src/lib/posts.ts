@@ -193,6 +193,8 @@ function normalizePaper(value: unknown): PaperDTO | null {
         orcid: typeof a.orcid === "string" ? a.orcid : undefined,
       }))
     : [];
+  // 后端字段名可能为 pdfFileId 或 pdf_file_id，两者都接受。
+  const rawFileId = value.pdfFileId ?? value.pdf_file_id;
   return {
     id: value.id,
     doi: str(value.doi),
@@ -206,6 +208,8 @@ function normalizePaper(value: unknown): PaperDTO | null {
     citationCount: num(value.citationCount),
     metaSource: str(value.metaSource),
     createdAt: str(value.createdAt),
+    pdfFileId:
+      typeof rawFileId === "string" && rawFileId.trim().length > 0 ? rawFileId : null,
   };
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/thesis-shared/api/internal/config"
 	"github.com/thesis-shared/api/internal/db"
 	"github.com/thesis-shared/api/internal/server"
+	"github.com/thesis-shared/api/internal/storage"
 )
 
 // version 在构建时通过 -ldflags "-X main.version=..." 注入。
@@ -43,10 +44,31 @@ func main() {
 	defer pool.Close()
 	slog.Info("database connected")
 
+	// 对象存储是可选依赖：初始化失败只降级文件功能，不影响其余接口。
+	// 这样本地没启动 S3 时仍可开发信息流、论文解析等功能。
+	var store *storage.Client
+	if sc, err := storage.New(storage.Config{
+		Endpoint:  cfg.S3Endpoint,
+		AccessKey: cfg.S3AccessKey,
+		SecretKey: cfg.S3SecretKey,
+		Bucket:    cfg.S3Bucket,
+		UseSSL:    cfg.S3UseSSL,
+	}); err != nil {
+		slog.Warn("对象存储不可用，文件上传功能已禁用", "err", err)
+	} else {
+		if err := sc.EnsureBucket(ctx); err != nil {
+			slog.Warn("无法确认存储桶，文件上传功能已禁用", "err", err)
+		} else {
+			store = sc
+			slog.Info("对象存储已连接", "endpoint", cfg.S3Endpoint, "bucket", cfg.S3Bucket)
+		}
+	}
+
 	srv := server.New(server.Deps{
 		Config:  cfg,
 		Version: version,
 		Pool:    pool,
+		Storage: store,
 	})
 
 	go func() {

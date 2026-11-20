@@ -9,10 +9,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thesis-shared/api/internal/config"
 	"github.com/thesis-shared/api/internal/content"
+	"github.com/thesis-shared/api/internal/file"
 	"github.com/thesis-shared/api/internal/handler"
 	"github.com/thesis-shared/api/internal/identity"
 	appmiddleware "github.com/thesis-shared/api/internal/middleware"
 	"github.com/thesis-shared/api/internal/paper"
+	"github.com/thesis-shared/api/internal/storage"
 )
 
 // Deps 是 server 构建路由时所需的外部依赖。
@@ -20,6 +22,9 @@ type Deps struct {
 	Config  config.Config
 	Version string
 	Pool    *pgxpool.Pool
+	// Storage 为 nil 时文件相关路由不注册，其余功能照常可用。
+	// 这样对象存储不可用不会让整个服务启动失败。
+	Storage *storage.Client
 }
 
 // New 组装 HTTP 路由与中间件，返回可启动的 http.Server。
@@ -74,6 +79,16 @@ func New(d Deps) *http.Server {
 			r.Delete("/posts/{id}/bookmark", contents.Unbookmark)
 			r.Post("/posts/{id}/comments", contents.CreateComment)
 			r.Get("/posts/{id}/comments", contents.ListComments)
+
+			// 文件上传流水线（PRD V-01~V-07 / P-05）。
+			// 对象存储不可用时（d.Storage == nil）不注册，避免出现必然失败的接口。
+			if d.Storage != nil {
+				files := handler.NewFileHandler(file.NewService(d.Pool, d.Storage))
+				r.Post("/files/presign", files.Presign)
+				r.Post("/files/{id}/complete", files.Complete)
+				r.Get("/files/{id}", files.Get)
+				r.Get("/files/{id}/pages", files.Pages)
+			}
 		})
 
 		// 公开个人主页：无需登录，供分享链接与搜索引擎抓取（PRD A-03 / §7.4）。

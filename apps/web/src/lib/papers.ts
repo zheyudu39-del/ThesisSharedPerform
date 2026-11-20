@@ -24,6 +24,11 @@ export type PaperDTO = {
   citationCount: number;
   metaSource: string;
   createdAt: string;
+  /**
+   * 关联的 PDF 文件 id（papers.pdf_file_id）。为空表示这篇论文还没有上传全文，
+   * 卡片只做文本预览；有值时由 PdfPreview 渲染服务端生成的页图。
+   */
+  pdfFileId: string | null;
 };
 
 export type ResolveResult = {
@@ -121,5 +126,30 @@ export async function getPaper(id: string): Promise<PaperDTO> {
   if (typeof body !== "object" || body === null) {
     throw new AuthError("invalid_response", "服务器返回了无法识别的响应。", 0);
   }
-  return (body as { paper: PaperDTO }).paper;
+  return normalizePaper((body as { paper: unknown }).paper);
+}
+
+/**
+ * 归一化 PaperDTO。
+ *
+ * 后端目前还没把 `pdf_file_id` 序列化出来，因此同时接受 `pdfFileId` 与
+ * `pdf_file_id` 两种写法；两者都没有时为 null（走文本预览）。
+ */
+export function normalizePaper(value: unknown): PaperDTO {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new AuthError("invalid_response", "服务器返回了无法识别的响应。", 0);
+  }
+  const p = value as Record<string, unknown>;
+  if (typeof p.id !== "string") {
+    throw new AuthError("invalid_response", "服务器返回的论文数据不完整。", 0);
+  }
+
+  const rawFileId = p.pdfFileId ?? p.pdf_file_id;
+  const pdfFileId =
+    typeof rawFileId === "string" && rawFileId.trim().length > 0 ? rawFileId : null;
+
+  return {
+    ...(value as PaperDTO),
+    pdfFileId,
+  };
 }

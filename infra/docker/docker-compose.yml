@@ -30,25 +30,27 @@ services:
       timeout: 5s
       retries: 10
 
-  minio:
-    image: minio/minio:latest
-    container_name: thesis-minio
-    command: server /data --console-address ":9001"
+  # S3 兼容对象存储。
+  # 原计划使用 MinIO，但其 Docker Hub 仓库已限制匿名拉取（pull access denied），
+  # 因此改用 SeaweedFS —— 同样提供 S3 API，且 minio-go SDK 可直接对接。
+  # 注意 -ip.bind=0.0.0.0：SeaweedFS 默认只绑 127.0.0.1，容器内回环会导致端口映射失效。
+  s3:
+    image: chrislusf/seaweedfs:latest
+    container_name: thesis-s3
+    command: >
+      server -dir=/data -ip=127.0.0.1 -ip.bind=0.0.0.0
+      -s3 -s3.port=8333 -master.port=9333 -filer.port=8888
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-minioadmin}
     ports:
-      - "${MINIO_PORT:-9000}:9000"
-      - "9001:9001"
+      - "${S3_PORT:-8333}:8333"
+      - "9333:9333"
+      - "8888:8888"
     volumes:
-      - miniodata:/data
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      - s3data:/data
 
 volumes:
   pgdata:
   redisdata:
-  miniodata:
+  s3data:
