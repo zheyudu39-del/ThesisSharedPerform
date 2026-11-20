@@ -28,3 +28,7 @@ LIMIT $4;
 -- 用于把回复层级限制在一层（PRD F-04「支持一级回复」）。
 SELECT id, parent_id FROM comments
 WHERE id = $1 AND post_id = $2 AND deleted_at IS NULL;
+
+-- name: GetCommentAuthorForNotify :one
+-- 回复通知要发给被回复评论的作者，这里只取作者 ID。
+SELECT author_id FROM comments WHERE id = $1 AND deleted_at IS NULL;

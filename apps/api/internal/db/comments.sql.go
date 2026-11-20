@@ -48,6 +48,18 @@ func (q *Queries) CreateComment(ctx context.Context, arg CreateCommentParams) (C
 	return i, err
 }
 
+const getCommentAuthorForNotify = `-- name: GetCommentAuthorForNotify :one
+SELECT author_id FROM comments WHERE id = $1 AND deleted_at IS NULL
+`
+
+// 回复通知要发给被回复评论的作者，这里只取作者 ID。
+func (q *Queries) GetCommentAuthorForNotify(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getCommentAuthorForNotify, id)
+	var author_id pgtype.UUID
+	err := row.Scan(&author_id)
+	return author_id, err
+}
+
 const getCommentByID = `-- name: GetCommentByID :one
 SELECT c.id, c.post_id, c.parent_id, c.author_id, c.content_html, c.content_text, c.like_count, c.created_at, c.deleted_at, u.name AS author_name, u.handle AS author_handle
 FROM comments c JOIN users u ON u.id = c.author_id

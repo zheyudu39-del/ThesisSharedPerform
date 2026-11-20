@@ -111,6 +111,20 @@ func (q *Queries) GetPaperForPost(ctx context.Context, id pgtype.UUID) (Paper, e
 	return i, err
 }
 
+const getPostAuthorForNotify = `-- name: GetPostAuthorForNotify :one
+SELECT author_id FROM posts WHERE id = $1 AND deleted_at IS NULL
+`
+
+// 点赞等互动在事务提交后生成通知，需要知道帖子作者。
+// 与 GetPostForWrite 分开：这里不套可见性谓词，调用方已经通过写路径校验过可读性，
+// 且私密帖的点赞同样应当通知作者本人（可见性只影响谁能操作，不影响作者收不收通知）。
+func (q *Queries) GetPostAuthorForNotify(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, getPostAuthorForNotify, id)
+	var author_id pgtype.UUID
+	err := row.Scan(&author_id)
+	return author_id, err
+}
+
 const getPostByID = `-- name: GetPostByID :one
 SELECT p.id, p.author_id, p.type, p.content_html, p.content_text, p.paper_id, p.repost_of, p.group_id, p.visibility, p.like_count, p.comment_count, p.repost_count, p.hot_score, p.created_at, p.updated_at, p.deleted_at, u.name AS author_name, u.handle AS author_handle, u.verify_type AS author_verify_type,
        EXISTS(SELECT 1 FROM reactions r WHERE r.user_id = $2 AND r.target_type = 'post' AND r.target_id = p.id AND r.kind = 'like') AS liked,

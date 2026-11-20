@@ -50,12 +50,15 @@ func New(d Deps) *http.Server {
 
 	// 检索与通知：两者都不依赖其他业务包，先构造，再以接口注入到写入方。
 	searchSvc := search.NewService(d.Pool)
-	notifications := handler.NewHandler(notify.NewService(d.Pool))
+	notifySvc := notify.NewService(d.Pool)
+	notifications := handler.NewHandler(notifySvc)
 	searches := handler.NewSearchHandler(searchSvc)
 
 	// 内容与群组服务通过 Indexer 接口接收检索能力，避免包之间直接 import。
+	// 内容服务另通过 Notifier 接口接收通知能力：点赞与评论在写入成功后生成通知。
 	contentSvc := content.NewService(d.Pool)
 	contentSvc.SetIndexer(contentIndexer{service: searchSvc})
+	contentSvc.SetNotifier(contentNotifier{service: notifySvc})
 	contents := handler.NewContentHandler(contentSvc)
 
 	users := handler.NewUserHandler(authService)
@@ -218,5 +221,20 @@ func (a groupIndexer) Index(ctx context.Context, doc group.SearchDocument) error
 		EntityID:   doc.EntityID,
 		Title:      doc.Title,
 		Body:       doc.Body,
+	})
+}
+
+// contentNotifier 把 notify.Service 适配成 content.Notifier。
+// 与 Indexer 同理：content 只认识自己的接口，通知的具体实现由 server 注入。
+type contentNotifier struct{ service *notify.Service }
+
+func (a contentNotifier) Notify(ctx context.Context, input content.NotifyInput) error {
+	return a.service.Notify(ctx, notify.CreateInput{
+		UserID:     input.UserID,
+		Type:       input.Type,
+		ActorID:    input.ActorID,
+		TargetType: input.TargetType,
+		TargetID:   input.TargetID,
+		Payload:    input.Payload,
 	})
 }

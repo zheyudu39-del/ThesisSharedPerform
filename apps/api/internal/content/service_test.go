@@ -188,3 +188,54 @@ func TestUUIDParamEncodesNilAsNull(t *testing.T) {
 		t.Fatalf("uuidParam(%v) = %v", id, value)
 	}
 }
+
+// fakeNotifier 记录内容服务发出的通知，用于验证点赞/评论的接线。
+type fakeNotifier struct{ inputs []NotifyInput }
+
+func (f *fakeNotifier) Notify(_ context.Context, input NotifyInput) error {
+	f.inputs = append(f.inputs, input)
+	return nil
+}
+
+func TestNotifyLikeSkipsSelfAndNilNotifier(t *testing.T) {
+	author := uuid.New()
+	postID := uuid.New()
+
+	// 未注入 notifier 时不应 panic。
+	(&Service{}).notifyLike(context.Background(), author, uuid.New(), postID)
+
+	notifier := &fakeNotifier{}
+	service := &Service{notifier: notifier}
+
+	// 自己给自己点赞不生成通知。
+	service.notifyLike(context.Background(), author, author, postID)
+	if len(notifier.inputs) != 0 {
+		t.Fatalf("自赞不应生成通知，实际 %d 条", len(notifier.inputs))
+	}
+
+	actor := uuid.New()
+	service.notifyLike(context.Background(), author, actor, postID)
+	if len(notifier.inputs) != 1 {
+		t.Fatalf("点赞通知数 = %d，期望 1", len(notifier.inputs))
+	}
+	got := notifier.inputs[0]
+	if got.UserID != author || got.ActorID != actor || got.Type != "like_agg" ||
+		got.TargetType != "post" || got.TargetID != postID {
+		t.Fatalf("点赞通知字段不正确: %+v", got)
+	}
+}
+
+func TestNotifyCommentUsesRecipientAndType(t *testing.T) {
+	notifier := &fakeNotifier{}
+	service := &Service{notifier: notifier}
+	recipient, actor, postID := uuid.New(), uuid.New(), uuid.New()
+
+	service.notifyComment(context.Background(), recipient, actor, postID, "reply")
+	if len(notifier.inputs) != 1 {
+		t.Fatalf("回复通知数 = %d，期望 1", len(notifier.inputs))
+	}
+	got := notifier.inputs[0]
+	if got.UserID != recipient || got.ActorID != actor || got.Type != "reply" || got.TargetID != postID {
+		t.Fatalf("回复通知字段不正确: %+v", got)
+	}
+}

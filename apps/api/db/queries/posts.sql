@@ -21,6 +21,12 @@ WHERE p.id = $1 AND p.deleted_at IS NULL
         AND EXISTS(SELECT 1 FROM group_members gm WHERE gm.group_id = p.group_id AND gm.user_id = $2))
   );
 
+-- name: GetPostAuthorForNotify :one
+-- 点赞等互动在事务提交后生成通知，需要知道帖子作者。
+-- 与 GetPostForWrite 分开：这里不套可见性谓词，调用方已经通过写路径校验过可读性，
+-- 且私密帖的点赞同样应当通知作者本人（可见性只影响谁能操作，不影响作者收不收通知）。
+SELECT author_id FROM posts WHERE id = $1 AND deleted_at IS NULL;
+
 -- name: UpsertTag :one
 INSERT INTO tags (name, slug) VALUES ($1, $2)
 ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name

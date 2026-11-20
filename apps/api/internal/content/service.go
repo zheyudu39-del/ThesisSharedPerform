@@ -121,6 +121,24 @@ type Indexer interface {
 	Index(ctx context.Context, doc SearchDocument) error
 }
 
+// NotifyInput 描述一条待生成的通知，字段与 notify.CreateInput 一一对应。
+// 与 SearchDocument 同理，这里重新声明一份而不直接引用 notify 包：
+// content 只认识自己的抽象，由 server 侧适配器桥接。
+type NotifyInput struct {
+	UserID     uuid.UUID
+	Type       string
+	ActorID    uuid.UUID
+	TargetType string
+	TargetID   uuid.UUID
+	Payload    map[string]any
+}
+
+// Notifier 是通知生成的抽象，由 server 注入 notify.Service 的适配器。
+// 为 nil 时跳过通知（单元测试或未接入通知的部署），业务写入不受影响。
+type Notifier interface {
+	Notify(ctx context.Context, input NotifyInput) error
+}
+
 // readQuerier 是公开读路径（帖子详情、评论列表）用到的最小查询集合。
 // 单独抽出是为了让「匿名查看者 = uuid.Nil」的映射能在没有数据库的单元测试里验证。
 type readQuerier interface {
@@ -135,6 +153,8 @@ type Service struct {
 	queries readQuerier
 	// indexer 可选：nil 时跳过索引，业务写入不受影响。
 	indexer Indexer
+	// notifier 可选：nil 时跳过通知生成。
+	notifier Notifier
 }
 
 func NewService(pool *pgxpool.Pool) *Service {
@@ -144,6 +164,10 @@ func NewService(pool *pgxpool.Pool) *Service {
 // SetIndexer 注入检索索引实现。server 在创建内容服务后调用一次；
 // 不注入时索引被静默跳过（与 MVP「索引缺失可由重建任务补齐」的约定一致）。
 func (s *Service) SetIndexer(indexer Indexer) { s.indexer = indexer }
+
+// SetNotifier 注入通知实现。server 在创建内容服务后调用一次；
+// 不注入时点赞/评论不产生通知（单元测试或未接入通知的部署）。
+func (s *Service) SetNotifier(notifier Notifier) { s.notifier = notifier }
 
 // newServiceWithQuerier 用于测试注入替身；写路径仍需 pool，故只覆盖读路径。
 func newServiceWithQuerier(queries readQuerier) *Service { return &Service{queries: queries} }
@@ -453,10 +477,43 @@ func (s *Service) SetLike(ctx context.Context, userID, postID uuid.UUID, liked b
 	if err != nil {
 		return 0, err
 	}
+	// 只有「本次真正新增了一个赞」才通知：重复点赞（changed == 0）不重复打扰。
+	// 作者在事务内先取，提交后再发通知——通知失败不能回滚已经成功的点赞。
+	var authorID uuid.UUID
+	if liked && changed == 1 {
+		row, lookupErr := q.GetPostAuthorForNotify(ctx, uuidParam(postID))
+		switch {
+		case lookupErr == nil && row.Valid:
+			authorID = uuid.UUID(row.Bytes)
+		case lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows):
+			// 查询作者失败只影响通知，不应让点赞失败。
+			slog.Error("查询帖子作者失败", "postId", postID, "err", lookupErr)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
+	if authorID != uuid.Nil {
+		s.notifyLike(ctx, authorID, userID, postID)
+	}
 	return count, nil
+}
+
+// notifyLike 生成点赞聚合通知。自己给自己点赞由 notify 服务层再兜底跳过，
+// 这里提前返回可以省掉一次查询。
+func (s *Service) notifyLike(ctx context.Context, authorID, actorID, postID uuid.UUID) {
+	if s.notifier == nil || authorID == actorID {
+		return
+	}
+	if err := s.notifier.Notify(ctx, NotifyInput{
+		UserID:     authorID,
+		Type:       "like_agg",
+		ActorID:    actorID,
+		TargetType: "post",
+		TargetID:   postID,
+	}); err != nil {
+		slog.Error("生成点赞通知失败", "postId", postID, "err", err)
+	}
 }
 
 // SetBookmark 通过主键冲突/删除行数实现幂等，不影响帖子热度。
@@ -526,10 +583,39 @@ func (s *Service) CreateComment(ctx context.Context, userID, postID uuid.UUID, c
 	if err != nil {
 		return Comment{}, err
 	}
+	// 通知对象在提交前确定：主评论通知帖子作者，回复通知被回复评论的作者。
+	// 通知在提交后发送，失败只记日志，不影响评论本身。
+	recipient, notifyType := uuid.Nil, ""
+	if parentID != nil {
+		if parentAuthor, err := q.GetCommentAuthorForNotify(ctx, uuidParam(*parentID)); err == nil && parentAuthor.Valid {
+			recipient, notifyType = uuid.UUID(parentAuthor.Bytes), "reply"
+		}
+	} else if postAuthor, err := q.GetPostAuthorForNotify(ctx, uuidParam(postID)); err == nil && postAuthor.Valid {
+		recipient, notifyType = uuid.UUID(postAuthor.Bytes), "comment"
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Comment{}, err
 	}
+	if recipient != uuid.Nil && recipient != userID {
+		s.notifyComment(ctx, recipient, userID, postID, notifyType)
+	}
 	return toComment(row), nil
+}
+
+// notifyComment 生成评论/回复通知。
+func (s *Service) notifyComment(ctx context.Context, recipient, actorID, postID uuid.UUID, notifyType string) {
+	if s.notifier == nil {
+		return
+	}
+	if err := s.notifier.Notify(ctx, NotifyInput{
+		UserID:     recipient,
+		Type:       notifyType,
+		ActorID:    actorID,
+		TargetType: "post",
+		TargetID:   postID,
+	}); err != nil {
+		slog.Error("生成评论通知失败", "postId", postID, "type", notifyType, "err", err)
+	}
 }
 
 // ListComments 返回帖子的评论列表。
