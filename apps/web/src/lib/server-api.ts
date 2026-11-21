@@ -367,3 +367,40 @@ export async function fetchPaperList(limit = 100): Promise<PaperDTO[]> {
     .map(normalizePaper)
     .filter((p): p is PaperDTO => p !== null);
 }
+
+/* -------------------------------------------------------------------------- */
+/* 文档                                                                        */
+/* -------------------------------------------------------------------------- */
+
+export type ServerDocument = {
+  id: string;
+  groupId: string;
+  groupSlug: string;
+  title: string;
+  status: "draft" | "active" | "archived";
+  defaultRole: "owner" | "editor" | "viewer";
+  wordCount: number;
+  latestSnapshot: number;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: { id: string; name: string; handle: string };
+};
+
+/**
+ * 服务端读取文档元数据与当前用户角色。
+ *
+ * 必须 no-store：响应里的 myRole 因人而异，若进入 Next 的共享 Data Cache
+ * 会让不同用户看到彼此的角色。
+ */
+export const fetchDocument = cache(
+  async (id: string): Promise<{ document: ServerDocument; myRole: "owner" | "editor" | "viewer" | null } | null> => {
+    const body = await fetchJSON(`/documents/${encodeURIComponent(id)}`, false);
+    if (typeof body !== "object" || body === null) return null;
+    const record = body as Record<string, unknown>;
+    if (typeof record.document !== "object" || record.document === null) return null;
+    return {
+      document: record.document as ServerDocument,
+      myRole: (record.myRole as "owner" | "editor" | "viewer" | null) ?? null,
+    };
+  },
+);

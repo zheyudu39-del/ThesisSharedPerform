@@ -27,6 +27,8 @@ type Config struct {
 
 	JWTSecret string
 	JWTTTL    time.Duration
+	// WSPublicURL 是浏览器连接协同服务的地址（ws:// 或 wss://）。
+	WSPublicURL string
 }
 
 // devJWTSecret 仅供本地开发使用。生产环境必须显式提供 JWT_SECRET，
@@ -55,8 +57,9 @@ func Load() Config {
 		S3Bucket:    getenv("S3_BUCKET", "thesis-files"),
 		S3UseSSL:    getenv("S3_USE_SSL", "false") == "true",
 
-		JWTSecret: getenv("JWT_SECRET", devJWTSecret),
-		JWTTTL:    time.Hour * 168,
+		JWTSecret:   getenv("JWT_SECRET", devJWTSecret),
+		JWTTTL:      time.Hour * 168,
+		WSPublicURL: getenv("WS_PUBLIC_URL", "ws://localhost:1234"),
 	}
 }
 

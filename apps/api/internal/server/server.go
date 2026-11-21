@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thesis-shared/api/internal/config"
 	"github.com/thesis-shared/api/internal/content"
+	"github.com/thesis-shared/api/internal/doc"
 	"github.com/thesis-shared/api/internal/file"
 	"github.com/thesis-shared/api/internal/group"
 	"github.com/thesis-shared/api/internal/handler"
@@ -67,6 +68,11 @@ func New(d Deps) *http.Server {
 	groupSvc.SetIndexer(groupIndexer{service: searchSvc})
 	groups := handler.NewGroupHandler(groupSvc)
 
+	// 文档元数据与权限。正文同步与快照落盘由 Node 协同服务负责，
+	// 这里只提供 REST 侧的 CRUD、成员覆盖、快照登记与批注。
+	docSvc := doc.NewService(d.Pool)
+	documents := handler.NewDocumentHandler(docSvc, tokens, d.Config.WSPublicURL)
+
 	// 限流：登录/注册是暴力破解与 Argon2 资源耗尽的主要入口。
 	// 每分钟每 IP 最多 10 次认证尝试（对应 PRD §7.3 安全设计中的登录限流）。
 	authLimiter := appmiddleware.NewRateLimiter(10, time.Minute)
@@ -107,6 +113,15 @@ func New(d Deps) *http.Server {
 			r.Get("/groups/{slug}/requests", groups.Requests)
 			r.Get("/groups/{slug}/feed", groups.Feed)
 
+			// 文档只读：文档属于群组，服务层按群成员身份与文档角色判定，
+			// 非成员一律 404（不泄露文档是否存在）。
+			r.Get("/groups/{slug}/documents", documents.List)
+			r.Get("/documents/{id}", documents.Get)
+			r.Get("/documents/{id}/collab-token", documents.CollabToken)
+			r.Get("/documents/{id}/members", documents.Members)
+			r.Get("/documents/{id}/snapshots", documents.Snapshots)
+			r.Get("/documents/{id}/annotations", documents.Annotations)
+
 			// 写接口：会话 Cookie 由浏览器自动携带，必须用双提交令牌区分
 			// 「本站发起」与「第三方站点伪造」，否则存在 CSRF 风险。
 			r.Group(func(r chi.Router) {
@@ -139,6 +154,18 @@ func New(d Deps) *http.Server {
 				r.Post("/groups/{slug}/requests", groups.CreateRequest)
 				r.Post("/groups/{slug}/requests/{requestId}/approve", groups.ApproveRequest)
 				r.Post("/groups/{slug}/requests/{requestId}/reject", groups.RejectRequest)
+
+				// 文档写操作。权限 owner > editor > viewer 由 doc 服务层判定：
+				// viewer 只能读，editor 可改标题/状态、建快照、写批注，
+				// 仅 owner 可删除文档、调整成员角色。
+				r.Post("/groups/{slug}/documents", documents.Create)
+				r.Patch("/documents/{id}", documents.Update)
+				r.Delete("/documents/{id}", documents.Delete)
+				r.Post("/documents/{id}/snapshots", documents.CreateSnapshot)
+				r.Post("/documents/{id}/annotations", documents.CreateAnnotation)
+				r.Patch("/documents/{id}/annotations/{aid}", documents.UpdateAnnotation)
+				r.Patch("/documents/{id}/members/{userId}", documents.UpdateMember)
+				r.Delete("/documents/{id}/members/{userId}", documents.RemoveMember)
 
 				// 通知写操作：标记已读会改变个人数据，必须带 CSRF 令牌。
 				r.Post("/notifications/{id}/read", notifications.MarkRead)

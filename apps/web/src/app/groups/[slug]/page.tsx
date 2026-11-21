@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { GroupAdminPanel } from "@/components/GroupAdminPanel";
+import { GroupDocuments } from "@/components/GroupDocuments";
 import { GroupFeed } from "@/app/groups/[slug]/GroupFeed";
 import { GroupJoinButton, GroupMemberCount } from "@/components/GroupMembership";
 import { GroupMembersPreview } from "@/app/groups/[slug]/GroupMembersPreview";
@@ -151,6 +152,17 @@ export default async function GroupPage({ params }: PageProps) {
         </header>
 
         <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_280px]">
+          {/* 主栏：协作文档 */}
+          <section className="min-w-0">
+            <h2 className="mb-4 flex items-baseline gap-2 border-b border-line pb-2.5">
+              <span className="font-display text-[1.15rem] font-semibold">协作文档</span>
+              <span className="font-mono text-[0.7rem] tracking-[0.06em] text-ink-3 uppercase">
+                Documents
+              </span>
+            </h2>
+            <GroupDocuments slug={group.slug} isMember={isMember} />
+          </section>
+
           {/* 主栏：群内动态 */}
           <section className="min-w-0">
             <h2 className="mb-4 flex items-baseline gap-2 border-b border-line pb-2.5">

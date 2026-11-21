@@ -1,0 +1,383 @@
+import * as Y from 'yjs'
+import pg from 'pg'
+import { Client as MinioClient } from 'minio'
+
+import { config } from './config.js'
+import { logger } from './logger.js'
+
+/**
+ * Y.Doc 持久化。
+ *
+ * 存储分层（见 docs/technical-architecture.md §4.4 / §5.1）：
+ *   - 快照：doc-snapshot/{docId}/{version}.bin —— Y.encodeStateAsUpdate 全量状态；
+ *   - 增量：doc-updates/{docId}/{seq}.bin   —— 两次快照之间的 Y update。
+ *   - PG 只存指针与版本号：doc_snapshots / doc_updates / documents.latest_*。
+ *
+ * 恢复顺序：最新快照 → 按 seq 顺序回放其后仍未合并的增量。
+ * 写快照时在同一事务里提升 documents.latest_snapshot，并把已被快照覆盖的
+ * 增量记录删掉（对象存储中的对应文件随后异步清理）。
+ *
+ * 容错约定：对象存储不可用不能阻塞编辑。增量写入是 best-effort（失败只记日志，
+ * 数据仍在内存与 Hocuspocus 的 debounce 快照里）；快照写入失败时抛错，
+ * Hocuspocus 会保留文档在内存中，不会丢数据。
+ */
+
+const { Pool } = pg
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** 与 Go 端 internal/storage 相同的 key 规范。 */
+export const snapshotKey = (docId, version) => `doc-snapshot/${docId}/${version}.bin`
+export const updateKey = (docId, seq) => `doc-updates/${docId}/${seq}.bin`
+
+let pool = null
+let minio = null
+let bucketReady = null
+
+function getPool() {
+  if (!pool) {
+    pool = new Pool({
+      connectionString: config.postgresDsn,
+      max: config.pgPoolMax,
+      connectionTimeoutMillis: 5000,
+      idleTimeoutMillis: 30_000,
+    })
+    pool.on('error', (err) => logger.error('PG 连接池错误', err))
+  }
+  return pool
+}
+
+/** 惰性创建 minio 客户端，并确保桶存在（SeaweedFS 上通常已由 Go 端创建）。 */
+function getMinio() {
+  if (!minio) {
+    minio = new MinioClient({
+      endPoint: config.s3.endpoint.split(':')[0],
+      port: Number.parseInt(config.s3.endpoint.split(':')[1] ?? '9000', 10),
+      useSSL: config.s3.useSSL,
+      accessKey: config.s3.accessKey,
+      secretKey: config.s3.secretKey,
+      // SeaweedFS 不提供虚拟主机风格的桶域名，必须 path-style。
+      pathStyle: true,
+      region: 'us-east-1',
+    })
+  }
+  return minio
+}
+
+async function ensureBucket() {
+  if (!bucketReady) {
+    bucketReady = (async () => {
+      const client = getMinio()
+      const exists = await client.bucketExists(config.s3.bucket).catch((err) => {
+        logger.warn(`检查存储桶失败: ${err.message}`)
+        return false
+      })
+      if (!exists) {
+        await client.makeBucket(config.s3.bucket).catch((err) => {
+          logger.warn(`创建存储桶 ${config.s3.bucket} 失败: ${err.message}`)
+        })
+      }
+    })()
+  }
+  return bucketReady
+}
+
+async function putObject(key, buffer) {
+  await ensureBucket()
+  await getMinio().putObject(config.s3.bucket, key, buffer, buffer.length, {
+    'Content-Type': 'application/octet-stream',
+  })
+}
+
+async function getObject(key) {
+  const stream = await getMinio().getObject(config.s3.bucket, key)
+  const chunks = []
+  for await (const chunk of stream) chunks.push(chunk)
+  return Buffer.concat(chunks)
+}
+
+async function removeObject(key) {
+  try {
+    await getMinio().removeObject(config.s3.bucket, key)
+  } catch (err) {
+    logger.warn(`清理对象 ${key} 失败: ${err.message}`)
+  }
+}
+
+function isNotFound(err) {
+  return err?.code === 'NoSuchKey' || err?.code === 'NotFound' || err?.statusCode === 404
+}
+
+/**
+ * 加载文档：最新快照 + 其后未合并的增量。
+ * 没有任何历史时返回空 Y.Doc（Hocuspocus 会直接使用它）。
+ */
+export async function loadDocument(docId) {
+  if (!UUID_RE.test(String(docId ?? ''))) {
+    throw new Error(`文档标识无效: ${docId}`)
+  }
+
+  const doc = new Y.Doc()
+  const db = getPool()
+
+  const { rows: docRows } = await db.query(
+    `SELECT latest_snapshot, latest_update_seq FROM documents WHERE id = $1 AND deleted_at IS NULL`,
+    [docId],
+  )
+  const meta = docRows[0]
+  if (!meta) {
+    throw new Error(`文档不存在: ${docId}`)
+  }
+
+  let snapshotVersion = 0
+  if (meta.latest_snapshot > 0) {
+    const { rows } = await db.query(
+      `SELECT version, storage_key FROM doc_snapshots WHERE doc_id = $1 AND version = $2`,
+      [docId, meta.latest_snapshot],
+    )
+    const snapshot = rows[0]
+    if (snapshot) {
+      try {
+        const buf = await getObject(snapshot.storage_key)
+        Y.applyUpdate(doc, new Uint8Array(buf), 'load-snapshot')
+        snapshotVersion = snapshot.version
+      } catch (err) {
+        // 快照丢失不应让文档打不开：退化为从增量回放（可能为空文档）。
+        logger.error(
+          `读取快照失败 doc=${docId} version=${snapshot.version}: ${err.message}；将尝试仅回放增量`,
+        )
+      }
+    } else {
+      logger.warn(`documents.latest_snapshot=${meta.latest_snapshot} 但缺少 doc_snapshots 记录 doc=${docId}`)
+    }
+  }
+
+  // 增量：seq 单调递增；已被快照覆盖的增量在写快照时删除，这里按 seq 全量回放。
+  const { rows: updates } = await db.query(
+    `SELECT seq, storage_key FROM doc_updates WHERE doc_id = $1 ORDER BY seq ASC`,
+    [docId],
+  )
+
+  let applied = 0
+  for (const update of updates) {
+    try {
+      const buf = await getObject(update.storage_key)
+      Y.applyUpdate(doc, new Uint8Array(buf), 'load-update')
+      applied += 1
+    } catch (err) {
+      if (isNotFound(err)) {
+        logger.warn(`增量对象缺失 doc=${docId} seq=${update.seq} key=${update.storage_key}`)
+        continue
+      }
+      throw err
+    }
+  }
+
+  logger.info(
+    `已加载文档 doc=${docId} snapshot=v${snapshotVersion} updates=${applied}/${updates.length}`,
+  )
+  return doc
+}
+
+/**
+ * 写全量快照。
+ *
+ * 版本号 = documents.latest_snapshot + 1，与快照记录、最新版本指针在同一事务
+ * 内更新；行锁（FOR UPDATE）保证多实例并发写同一文档时版本号不重复。
+ *
+ * @returns {{version:number, key:string, sizeBytes:number}}
+ */
+export async function storeDocument(docId, ydoc) {
+  if (!UUID_RE.test(String(docId ?? ''))) {
+    throw new Error(`文档标识无效: ${docId}`)
+  }
+  if (!(ydoc instanceof Y.Doc)) {
+    throw new Error('storeDocument 需要 Y.Doc 实例')
+  }
+
+  // 水位线必须在 encode 之前读取：seq ≤ watermark 的增量一定已经应用进文档，
+  // 因此 encodeStateAsUpdate 的产物必然覆盖它们，快照提交后可以安全删除。
+  // 反过来（先 encode 再读 seq）会把 encode 之后才落库的增量误删，造成丢数据。
+  const { rows: watermarkRows } = await getPool().query(
+    `SELECT latest_update_seq FROM documents WHERE id = $1 AND deleted_at IS NULL`,
+    [docId],
+  )
+  if (!watermarkRows[0]) {
+    throw new Error(`文档不存在或已删除: ${docId}`)
+  }
+  const watermark = Number(watermarkRows[0].latest_update_seq)
+
+  const state = Y.encodeStateAsUpdate(ydoc)
+  const buffer = Buffer.from(state)
+
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+
+    const { rows } = await client.query(
+      `SELECT latest_snapshot
+         FROM documents
+        WHERE id = $1 AND deleted_at IS NULL
+        FOR UPDATE`,
+      [docId],
+    )
+    const meta = rows[0]
+    if (!meta) {
+      throw new Error(`文档不存在或已删除: ${docId}`)
+    }
+
+    const version = meta.latest_snapshot + 1
+    const key = snapshotKey(docId, version)
+
+    // 先落对象再落元数据：事务回滚最多留下一个孤儿对象，不会出现指向空对象的记录。
+    await putObject(key, buffer)
+
+    await client.query(
+      `INSERT INTO doc_snapshots (doc_id, version, storage_key, size_bytes, label)
+       VALUES ($1, $2, $3, $4, NULL)`,
+      [docId, version, key, buffer.length],
+    )
+    await client.query(
+      `UPDATE documents SET latest_snapshot = $2, updated_at = now() WHERE id = $1`,
+      [docId, version],
+    )
+
+    // 只删除 encode 之前就已落库的增量（seq ≤ watermark）。快照之后到达的
+    // 增量保留，下次加载时回放——重复应用同一 update 在 Yjs 中是幂等的。
+    const { rows: stale } = await client.query(
+      `DELETE FROM doc_updates WHERE doc_id = $1 AND seq <= $2 RETURNING storage_key`,
+      [docId, watermark],
+    )
+
+    await client.query('COMMIT')
+
+    for (const row of stale) {
+      void removeObject(row.storage_key)
+    }
+
+    logger.info(
+      `快照已保存 doc=${docId} v${version} ${buffer.length}B（清理增量 ${stale.length} 条）`,
+    )
+    return { version, key, sizeBytes: buffer.length }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    logger.error(`保存快照失败 doc=${docId}`, err)
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+/**
+ * 追加一条增量（best-effort）。
+ *
+ * seq 由 documents.latest_update_seq 原子自增获得，key 按规范拼出。
+ * 上传失败时删除刚插入的元数据行，避免加载时指向不存在的对象。
+ *
+ * @returns {{seq:number, key:string}|null} 失败返回 null，调用方不应中断编辑
+ */
+export async function appendUpdate(docId, update) {
+  if (!UUID_RE.test(String(docId ?? ''))) return null
+  if (!(update instanceof Uint8Array) || update.length === 0) return null
+
+  const buffer = Buffer.from(update)
+  let row
+  try {
+    const { rows } = await getPool().query(
+      `WITH next AS (
+         UPDATE documents
+            SET latest_update_seq = latest_update_seq + 1,
+                updated_at = now()
+          WHERE id = $1 AND deleted_at IS NULL
+        RETURNING latest_update_seq
+       )
+       INSERT INTO doc_updates (doc_id, seq, storage_key, size_bytes)
+       SELECT $1, next.latest_update_seq,
+              'doc-updates/' || $1::text || '/' || next.latest_update_seq::text || '.bin',
+              $2
+         FROM next
+       RETURNING seq, storage_key`,
+      [docId, buffer.length],
+    )
+    row = rows[0]
+  } catch (err) {
+    logger.warn(`记录增量失败 doc=${docId}: ${err.message}`)
+    return null
+  }
+  if (!row) return null
+
+  try {
+    await putObject(row.storage_key, buffer)
+    return { seq: Number(row.seq), key: row.storage_key }
+  } catch (err) {
+    logger.warn(`上传增量失败 doc=${docId} seq=${row.seq}: ${err.message}（编辑不受影响）`)
+    await getPool()
+      .query(`DELETE FROM doc_updates WHERE doc_id = $1 AND seq = $2`, [docId, row.seq])
+      .catch(() => {})
+    return null
+  }
+}
+
+/**
+ * 增量日志：把高频 update 在内存里合并后再落盘，避免每次按键都发一次 S3 请求。
+ * 定时器到期时用 Y.mergeUpdates 合并成一个 update 追加。
+ */
+class UpdateJournal {
+  constructor(flushMs) {
+    this.flushMs = flushMs
+    this.entries = new Map() // docId -> { updates: Uint8Array[], timer: NodeJS.Timeout|null }
+  }
+
+  push(docId, update) {
+    let entry = this.entries.get(docId)
+    if (!entry) {
+      entry = { updates: [], timer: null }
+      this.entries.set(docId, entry)
+    }
+    entry.updates.push(update)
+    if (!entry.timer) {
+      entry.timer = setTimeout(() => {
+        entry.timer = null
+        void this.flush(docId)
+      }, this.flushMs)
+      entry.timer.unref?.()
+    }
+  }
+
+  async flush(docId) {
+    const entry = this.entries.get(docId)
+    if (!entry || entry.updates.length === 0) return
+    const updates = entry.updates
+    entry.updates = []
+    if (entry.timer) {
+      clearTimeout(entry.timer)
+      entry.timer = null
+    }
+
+    const merged = updates.length === 1 ? updates[0] : Y.mergeUpdates(updates)
+    await appendUpdate(docId, merged)
+  }
+
+  async flushAll() {
+    const ids = [...this.entries.keys()]
+    await Promise.allSettled(ids.map((id) => this.flush(id)))
+  }
+}
+
+export const updateJournal = new UpdateJournal(config.updateFlushMs)
+
+/** 关闭连接池，供优雅退出与测试使用。 */
+export async function closePersistence() {
+  await updateJournal.flushAll()
+  if (pool) {
+    const closing = pool
+    pool = null
+    await closing.end()
+  }
+}
+
+/** 健康检查用：数据库是否可查询。 */
+export async function pingDatabase() {
+  const { rows } = await getPool().query('SELECT 1 AS ok')
+  return rows[0]?.ok === 1
+}

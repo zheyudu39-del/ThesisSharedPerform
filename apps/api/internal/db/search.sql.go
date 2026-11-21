@@ -31,8 +31,8 @@ func (q *Queries) DeleteSearchDocument(ctx context.Context, arg DeleteSearchDocu
 const searchAll = `-- name: SearchAll :many
 WITH q AS (
     SELECT
-        $1::text AS raw,
-        websearch_to_tsquery('simple', $1::text) AS tsq
+        $3::text AS raw,
+        websearch_to_tsquery('simple', $3::text) AS tsq
 )
 SELECT
     sd.entity_type,
@@ -44,17 +44,17 @@ SELECT
 FROM search_documents sd
 CROSS JOIN q
 WHERE sd.tsv @@ q.tsq
-   OR sd.title ILIKE $2::text
-   OR sd.body ILIKE $2::text
+   OR sd.title ILIKE $1::text
+   OR sd.body ILIKE $1::text
    OR similarity(sd.title, q.raw) >= 0.2
 ORDER BY rank DESC, title_similarity DESC, sd.updated_at DESC
-LIMIT $3::int
+LIMIT $2::int
 `
 
 type SearchAllParams struct {
-	Query       string `json:"query"`
 	LikePattern string `json:"like_pattern"`
 	Limit       int32  `json:"limit"`
+	Query       string `json:"query"`
 }
 
 type SearchAllRow struct {
@@ -77,8 +77,13 @@ type SearchAllRow struct {
 //     按技术方案迁移到 Meilisearch。
 //
 // similarity(title, 原查询) 同时用于排序，作为「标题相近但未包含」的补充召回。
+//
+// sqlc.arg('like_pattern') 由服务层拼好并转义（'%' || 转义后的关键词 || '%'），
+// 避免用户输入里的 % / _ 被当作通配符。
+// 不包 COALESCE：title/body 为 NULL 时比较结果为 NULL（等价 false），
+// 同时保留 idx_search_title_trgm 的可用性（表达式索引无法被 COALESCE 命中）。
 func (q *Queries) SearchAll(ctx context.Context, arg SearchAllParams) ([]SearchAllRow, error) {
-	rows, err := q.db.Query(ctx, searchAll, arg.Query, arg.LikePattern, arg.Limit)
+	rows, err := q.db.Query(ctx, searchAll, arg.LikePattern, arg.Limit, arg.Query)
 	if err != nil {
 		return nil, err
 	}
@@ -107,8 +112,8 @@ func (q *Queries) SearchAll(ctx context.Context, arg SearchAllParams) ([]SearchA
 const searchByTypes = `-- name: SearchByTypes :many
 WITH q AS (
     SELECT
-        $1::text AS raw,
-        websearch_to_tsquery('simple', $1::text) AS tsq
+        $4::text AS raw,
+        websearch_to_tsquery('simple', $4::text) AS tsq
 )
 SELECT
     sd.entity_type,
@@ -121,20 +126,20 @@ FROM search_documents sd
 CROSS JOIN q
 WHERE (
         sd.tsv @@ q.tsq
-     OR sd.title ILIKE $2::text
-     OR sd.body ILIKE $2::text
+     OR sd.title ILIKE $1::text
+     OR sd.body ILIKE $1::text
      OR similarity(sd.title, q.raw) >= 0.2
 )
-AND sd.entity_type = ANY($3::text[])
+AND sd.entity_type = ANY($2::text[])
 ORDER BY rank DESC, title_similarity DESC, sd.updated_at DESC
-LIMIT $4::int
+LIMIT $3::int
 `
 
 type SearchByTypesParams struct {
-	Query       string   `json:"query"`
 	LikePattern string   `json:"like_pattern"`
 	Types       []string `json:"types"`
 	Limit       int32    `json:"limit"`
+	Query       string   `json:"query"`
 }
 
 type SearchByTypesRow struct {
@@ -150,10 +155,10 @@ type SearchByTypesRow struct {
 // 服务层在 types 为空时改走 SearchAll）。
 func (q *Queries) SearchByTypes(ctx context.Context, arg SearchByTypesParams) ([]SearchByTypesRow, error) {
 	rows, err := q.db.Query(ctx, searchByTypes,
-		arg.Query,
 		arg.LikePattern,
 		arg.Types,
 		arg.Limit,
+		arg.Query,
 	)
 	if err != nil {
 		return nil, err
@@ -181,6 +186,7 @@ func (q *Queries) SearchByTypes(ctx context.Context, arg SearchByTypesParams) ([
 }
 
 const upsertSearchDocument = `-- name: UpsertSearchDocument :exec
+
 INSERT INTO search_documents (entity_type, entity_id, title, body, tsv)
 VALUES (
     $1::varchar(16),
@@ -204,6 +210,16 @@ type UpsertSearchDocumentParams struct {
 	Body       *string     `json:"body"`
 }
 
+// 检索模块查询（MVP：PostgreSQL tsvector + pg_trgm）。
+//
+// 环境约定：PostgreSQL 18，未安装 pg_jieba / zhparser，分词统一使用 'simple' 配置：
+//   - 英文与数字按空格、标点切分并转小写；
+//   - 中文没有词边界，连续的一段汉字会成为「一个」词元，
+//     因此「部分词」命中（例如用「深度」找「深度学习」）无法走 tsvector，
+//     只能由 pg_trgm 的 ILIKE / similarity 兜底。
+//
+// 排序规则：ts_rank（全文命中）优先，其次 similarity(title)（标题模糊命中），
+// 最后 updated_at 倒序。search_documents 没有 created_at，用 updated_at 作为时间兜底。
 // 按 (entity_type, entity_id) 幂等写入索引，并重算 tsv：
 // 标题权重 A、正文权重 B（与技术方案 §4.6 的「标题 > 摘要 > 正文」一致）。
 func (q *Queries) UpsertSearchDocument(ctx context.Context, arg UpsertSearchDocumentParams) error {
