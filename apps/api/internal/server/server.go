@@ -232,6 +232,9 @@ func New(d Deps) *http.Server {
 				// 导出：正文由前端从 TipTap 取出 HTML 提交，服务端转 Word/Markdown/LaTeX。
 				// 要求 editor 及以上，viewer 只能读不能导出（PRD D-08）。
 				r.Post("/documents/{id}/export", documents.Export)
+				// 导入 Word / LaTeX：服务端转 HTML，前端写进协同编辑器。
+				// 与导出对称，要求 editor 及以上。
+				r.Post("/documents/{id}/import", documents.Import)
 				r.Post("/documents/{id}/annotations", documents.CreateAnnotation)
 				r.Patch("/documents/{id}/annotations/{aid}", documents.UpdateAnnotation)
 				r.Patch("/documents/{id}/members/{userId}", documents.UpdateMember)

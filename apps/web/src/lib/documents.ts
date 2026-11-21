@@ -225,3 +225,60 @@ function sanitizeFilename(title: string): string {
     .trim();
   return cleaned || "document";
 }
+
+/* -------------------------------------------------------------------------- */
+/* 导入                                                                        */
+/* -------------------------------------------------------------------------- */
+
+export type ImportFormat = "docx" | "tex";
+
+export type ImportResult = {
+  /** 转换后的 HTML，交给编辑器 setContent。 */
+  html: string;
+  /** 从文件名推断的标题，可用作文档标题建议。 */
+  title: string;
+  format: string;
+  /** 转换中的降级说明（图片未导入、公式以源码保留等）。 */
+  warnings: string[];
+};
+
+/**
+ * 导入 Word / LaTeX。
+ *
+ * 用 base64 传二进制：一个端点覆盖 docx（二进制）与 tex（文本），
+ * 前端不必为两种格式写不同的上传逻辑。
+ */
+export async function importDocument(
+  id: string,
+  file: File,
+  format?: ImportFormat,
+): Promise<ImportResult> {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+
+  // 分块转 base64：一次性 String.fromCharCode(...bytes) 在几 MB 的
+  // 文件上会撑爆调用栈（参数个数上限）。
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+
+  const body = (await apiFetch(`/documents/${encodeURIComponent(id)}/import`, {
+    method: "POST",
+    body: {
+      filename: file.name,
+      format: format ?? "",
+      contentBase64: btoa(binary),
+    },
+  })) as Record<string, unknown>;
+
+  return {
+    html: typeof body.html === "string" ? body.html : "",
+    title: typeof body.title === "string" ? body.title : "",
+    format: typeof body.format === "string" ? body.format : "",
+    warnings: Array.isArray(body.warnings)
+      ? body.warnings.filter((w): w is string => typeof w === "string")
+      : [],
+  };
+}

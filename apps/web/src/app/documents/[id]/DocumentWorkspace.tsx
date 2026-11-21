@@ -9,10 +9,12 @@ import { ReferencePanel } from "@/components/ReferencePanel";
 import {
   EXPORT_FORMAT_LABEL,
   exportDocument,
+  importDocument,
   updateDocument,
   type DocRole,
   type DocumentDTO,
   type ExportFormat,
+  type ImportFormat,
 } from "@/lib/documents";
 
 /**
@@ -39,6 +41,7 @@ export function DocumentWorkspace({
   const [editor, setEditor] = useState<Editor | null>(null);
   const [exporting, setExporting] = useState<ExportFormat | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
 
   const canEdit = role === "owner" || role === "editor";
 
@@ -46,6 +49,49 @@ export function DocumentWorkspace({
   const handleEditorReady = useCallback((instance: Editor | null) => {
     setEditor(instance);
   }, []);
+
+  // 导入：把 Word / LaTeX 转成 HTML 后写进协同文档。
+  // 直接 setContent 而不是替换文件——导入后它就是一篇文章，
+  // 所有协作者实时看到，接着正常编辑。
+  const [importing, setImporting] = useState(false);
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
+
+  async function handleImport(file: File) {
+    if (!editor) {
+      setImportError("编辑器尚未就绪，请稍后再试。");
+      return;
+    }
+    // 覆盖前先确认：导入会替换当前正文，这在协同场景下影响所有人。
+    if (
+      !window.confirm(
+        `导入「${file.name}」将替换当前正文，且对所有协作者生效。确定继续？`,
+      )
+    ) {
+      return;
+    }
+    setImporting(true);
+    setImportError(null);
+    setImportWarnings([]);
+    try {
+      const format: ImportFormat | undefined = file.name.toLowerCase().endsWith(".docx")
+        ? "docx"
+        : file.name.toLowerCase().endsWith(".tex") ||
+            file.name.toLowerCase().endsWith(".latex")
+          ? "tex"
+          : undefined;
+      const result = await importDocument(doc.id, file, format);
+      if (!result.html.trim()) {
+        throw new Error("文档没有可导入的正文。");
+      }
+      // 关键一步：内容通过编辑器的协同绑定直接写进 Y.Doc。
+      editor.commands.setContent(result.html);
+      setImportWarnings(result.warnings);
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "导入失败，请稍后重试。");
+    } finally {
+      setImporting(false);
+    }
+  }
 
   async function handleExport(format: ExportFormat) {
     if (!editor) {
@@ -169,6 +215,48 @@ export function DocumentWorkspace({
             ))}
             {exportError && <span className="text-[0.74rem] text-danger">{exportError}</span>}
           </div>
+        )}
+
+        {/*
+          导入：把 Word / LaTeX 正文带进协同编辑器，之后就是一篇正常文档，
+          所有协作者可继续编辑。转换在服务端完成，前端只负责写进 Y.Doc。
+        */}
+        {canEdit && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[0.68rem] tracking-[0.08em] text-ink-3 uppercase">
+              导入
+            </span>
+            <label
+              className={`cursor-pointer rounded-[3px] border border-line-strong px-2.5 py-1 text-[0.74rem] text-ink-2 hover:border-ink-3 hover:text-ink ${
+                importing || !editor ? "pointer-events-none opacity-50" : ""
+              }`}
+            >
+              {importing ? "导入中…" : "Word (.docx) / LaTeX (.tex)"}
+              <input
+                type="file"
+                accept=".docx,.tex,.latex"
+                className="sr-only"
+                disabled={importing || !editor}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  // 清空 value：否则连续选同一个文件不会触发 onChange。
+                  e.target.value = "";
+                  if (file) void handleImport(file);
+                }}
+              />
+            </label>
+            {importError && <span className="text-[0.74rem] text-danger">{importError}</span>}
+          </div>
+        )}
+
+        {importWarnings.length > 0 && (
+          <ul className="mt-2 flex flex-col gap-1 rounded-[6px] border border-warn/40 bg-warn-wash px-3 py-2">
+            {importWarnings.map((warning) => (
+              <li key={warning} className="text-[0.74rem] leading-relaxed text-warn">
+                {warning}
+              </li>
+            ))}
+          </ul>
         )}
       </header>
 

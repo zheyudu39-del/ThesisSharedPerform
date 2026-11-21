@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -593,4 +594,48 @@ func contentDisposition(filename string) string {
 		}
 	}
 	return `attachment; filename="` + string(ascii) + `"; filename*=UTF-8''` + url.PathEscape(filename)
+}
+
+// ---------------------------------------------------------------------------
+// 导入
+// ---------------------------------------------------------------------------
+
+// Import 处理 POST /api/v1/documents/{id}/import。
+//
+// 请求体 {filename, format, contentBase64}：contentBase64 是文件原始字节。
+// 为什么用 base64 而不是 multipart：docx 是二进制、tex 是文本，
+// 统一成 base64 让一个端点覆盖两种格式，前端也不必拼 FormData。
+//
+// 返回 HTML，由前端写进协同编辑器（见 doc.ImportFile 的说明）。
+func (h *DocumentHandler) Import(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+	docID, ok := docIDFromPath(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Filename      string `json:"filename"`
+		Format        string `json:"format"`
+		ContentBase64 string `json:"contentBase64"`
+	}
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+
+	// 限制解码后的体积，避免一个超大 base64 把内存吃光。
+	content, err := base64.StdEncoding.DecodeString(req.ContentBase64)
+	if err != nil {
+		WriteError(w, http.StatusUnprocessableEntity, "validation_error", "文件内容不是合法的 base64")
+		return
+	}
+
+	result, err := h.service.ImportFile(r.Context(), userID, docID, req.Filename, content, req.Format)
+	if err != nil {
+		writeDocError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
