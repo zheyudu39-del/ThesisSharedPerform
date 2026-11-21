@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thesis-shared/api/internal/db"
+	"github.com/thesis-shared/api/internal/storage"
 )
 
 // UserRef 是 DTO 里出现的最小用户摘要。
@@ -176,6 +177,10 @@ type Service struct {
 	// reloader 通知协同服务卸载内存中的文档；为 nil 表示未配置，
 	// 此时回滚会降级为「需要用户手动刷新」。
 	reloader CollabReloader
+	// store 是对象存储，导入/读取文档图片时使用；为 nil 时跳过图片。
+	store *storage.Client
+	// assets 查询 doc_assets。与主 Querier 分开，避免测试替身被迫实现。
+	assets assetQuerier
 }
 
 // NewService 构造服务。pool 为 nil 时只读路径可用（测试替身场景）。
@@ -186,6 +191,7 @@ func NewService(pool *pgxpool.Pool) *Service {
 		now:       time.Now,
 		editors:   dbEditorQuerier{queries: db.New(pool)},
 		snapshots: generatedSnapshotQuerier{queries: db.New(pool)},
+		assets:    db.New(pool),
 	}
 }
 

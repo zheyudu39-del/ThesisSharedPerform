@@ -639,3 +639,36 @@ func (h *DocumentHandler) Import(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, result)
 }
+
+// ---------------------------------------------------------------------------
+// 文档图片
+// ---------------------------------------------------------------------------
+
+// Asset 处理 GET /api/v1/documents/{id}/assets/{assetId}。
+//
+// 图片是文档的一部分，权限跟随文档：能看到文档就能看到它的图。
+// 不走 files 表的「上传者独占」模型——那样协作者会看不到对方贴的图。
+func (h *DocumentHandler) Asset(w http.ResponseWriter, r *http.Request) {
+	userID := viewerID(r)
+	docID, ok := docIDFromPath(w, r)
+	if !ok {
+		return
+	}
+	assetID, err := uuid.Parse(chi.URLParam(r, "assetId"))
+	if err != nil {
+		WriteError(w, http.StatusUnprocessableEntity, "validation_error", "图片 ID 格式不正确")
+		return
+	}
+	asset, err := h.service.GetDocAsset(r.Context(), userID, docID, assetID)
+	if err != nil {
+		writeDocError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", asset.ContentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(asset.Body)))
+	// 图片内容不会变（每次导入生成新 assetID），可以长期缓存。
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(asset.Body)
+}

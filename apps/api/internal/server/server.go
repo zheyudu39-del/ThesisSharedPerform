@@ -79,6 +79,9 @@ func New(d Deps) *http.Server {
 	// 回滚快照后，协同服务内存里的 Y.Doc 仍是旧内容。注入内部通道，
 	// 让它主动卸载文档，在线客户端自动重连后即拿到回滚版本。
 	docSvc.SetCollabReloader(doc.NewWSReloader(d.Config.WSInternalURL, d.Config.JWTSecret))
+	// 文档图片（导入 Word/LaTeX 时内嵌）需要对象存储。
+	// 未配置时导入会跳过图片并给出提示，正文照常导入。
+	docSvc.SetStorage(d.Storage)
 	documents := handler.NewDocumentHandler(docSvc, tokens, d.Config.WSPublicURL)
 
 	// 精选策展。PRD §1.2 明确不做个性化推荐，精选流靠人工判断，
@@ -169,6 +172,8 @@ func New(d Deps) *http.Server {
 			// 下载指定版本的快照二进制（限 editor 及以上）。
 			r.Get("/documents/{id}/snapshots/{version}/download", documents.DownloadSnapshot)
 			r.Get("/documents/{id}/annotations", documents.Annotations)
+			// 文档图片：权限跟随文档，登录用户按文档角色判定。
+			r.Get("/documents/{id}/assets/{assetId}", documents.Asset)
 
 			// 引用与参考文献（PRD D-06）。只读部分：列表与渲染后的文献表。
 			// 参考文献表是「渲染时」的决定，切换格式不改正文。

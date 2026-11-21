@@ -869,6 +869,17 @@ type Comment struct {
 	DeletedAt   pgtype.Timestamptz `json:"deleted_at"`
 }
 
+type DocAsset struct {
+	ID           pgtype.UUID        `json:"id"`
+	DocID        pgtype.UUID        `json:"doc_id"`
+	StorageKey   string             `json:"storage_key"`
+	Mime         string             `json:"mime"`
+	SizeBytes    int64              `json:"size_bytes"`
+	OriginalName *string            `json:"original_name"`
+	CreatedBy    pgtype.UUID        `json:"created_by"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
 type DocMember struct {
 	DocID     pgtype.UUID        `json:"doc_id"`
 	UserID    pgtype.UUID        `json:"user_id"`

@@ -149,13 +149,31 @@ func writeLatexChunk(b *strings.Builder, chunk string, warnings *[]string) {
 		return
 	}
 
-	// 公式环境：保留为代码块，内容不丢失，用户可自行改成编辑器里的公式。
+	// 表格环境：tabular / tabularx 转成标准 HTML 表格。
+	// 放在公式之前判断：表格里的单元格可能含 $...$，先按表格切开更稳妥。
+	if strings.Contains(chunk, `\begin{tabular}`) || strings.Contains(chunk, `\begin{tabularx}`) {
+		if html, ok := latexTableToHTML(chunk); ok {
+			b.WriteString(html)
+			return
+		}
+		*warnings = append(*warnings, "部分 LaTeX 表格无法解析，已按纯文本保留")
+	}
+
+	// 公式环境：转成编辑器认识的 blockMath 节点，由 KaTeX 渲染。
+	//
+	// 用 <block-math> 这个标签名而不是 <div data-type="blockMath">：
+	// TipTap 的数学扩展按节点名解析，标签名必须与扩展注册的名字对应
+	// （blockMath / inlineMath），否则内容会被当成普通文本。
 	if env := latexEnv.FindStringSubmatch(chunk); env != nil {
 		switch env[1] {
-		case "equation", "equation*", "align", "align*", "gather", "gather*", "displaymath", "math":
+		case "equation", "equation*", "gather", "gather*", "displaymath", "math":
 			inner := stripEnvironment(chunk, env[1])
-			*warnings = append(*warnings, "数学公式以 LaTeX 源码形式保留在代码块中")
-			fmt.Fprintf(b, "<pre><code>%s</code></pre>", escapeHTML(strings.TrimSpace(inner)))
+			fmt.Fprintf(b, "<block-math>%s</block-math>", escapeHTML(strings.TrimSpace(inner)))
+			return
+		case "align", "align*":
+			// align 是多行公式，KaTeX 的 aligned 环境能正确渲染。
+			inner := stripEnvironment(chunk, env[1])
+			fmt.Fprintf(b, "<block-math>\\begin{aligned}%s\\end{aligned}</block-math>", escapeHTML(strings.TrimSpace(inner)))
 			return
 		}
 	}
@@ -214,8 +232,8 @@ func convertLatexInline(text string, warnings *[]string) string {
 	text = regexp.MustCompile(`\\texttt\{([^{}]*)\}`).ReplaceAllString(text, "<code>$1</code>")
 	text = regexp.MustCompile(`\\text\{([^{}]*)\}`).ReplaceAllString(text, "$1")
 
-	// 行内公式：保留为代码，避免内容丢失。
-	text = regexp.MustCompile(`\$([^$]+)\$`).ReplaceAllString(text, "<code>$1</code>")
+	// 行内公式：转成 inlineMath 节点，由 KaTeX 渲染。
+	text = regexp.MustCompile(`\$([^$]+)\$`).ReplaceAllString(text, "<inline-math>$1</inline-math>")
 
 	// 换行与间距。
 	text = strings.ReplaceAll(text, `\\`, "<br>")
@@ -238,7 +256,10 @@ func convertLatexInline(text string, warnings *[]string) string {
 
 // escapeExceptTags 转义 HTML 特殊字符，但放过已知的行内标签。
 func escapeExceptTags(s string) string {
-	known := []string{"<strong>", "</strong>", "<em>", "</em>", "<u>", "</u>", "<code>", "</code>", "<br>"}
+	known := []string{
+		"<strong>", "</strong>", "<em>", "</em>", "<u>", "</u>",
+		"<code>", "</code>", "<br>", "<inline-math>", "</inline-math>",
+	}
 	// 用占位符保护标签，转义后再还原。
 	for i, tag := range known {
 		s = strings.ReplaceAll(s, tag, fmt.Sprintf("\x00TAG%d\x00", i))

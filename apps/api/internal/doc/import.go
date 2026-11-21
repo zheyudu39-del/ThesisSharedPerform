@@ -59,11 +59,40 @@ func (s *Service) ImportFile(ctx context.Context, userID, docID uuid.UUID, filen
 
 	switch format {
 	case "docx":
-		html, warnings, err := docxToHTML(content)
+		parsed, err := docxToHTML(content)
 		if err != nil {
 			return ImportResult{}, err
 		}
-		return ImportResult{HTML: html, Title: stripExt(filename), Format: "docx", Warnings: warnings}, nil
+		warnings := parsed.Warnings
+
+		// 图片：上传到对象存储后，把正文里的占位符换成稳定地址。
+		// 地址形如 /api/v1/documents/{docID}/assets/{assetID}——
+		// 不放预签名 URL，因为文档是长期的，预签名会过期。
+		if len(parsed.Images) > 0 {
+			mapping, imageWarnings, err := s.persistDocImages(ctx, userID, docID, parsed.Images)
+			if err != nil {
+				return ImportResult{}, err
+			}
+			warnings = append(warnings, imageWarnings...)
+			html := imgPlaceholderRegexp.ReplaceAllStringFunc(parsed.HTML, func(placeholder string) string {
+				sub := imgPlaceholderRegexp.FindStringSubmatch(placeholder)
+				if len(sub) < 2 {
+					return ""
+				}
+				assetID, ok := mapping[sub[1]]
+				if !ok {
+					// 这张图没上传成功：整段占位符去掉，避免正文里留下乱码。
+					return ""
+				}
+				return fmt.Sprintf(`<img src="/api/v1/documents/%s/assets/%s" alt="文档图片">`, docID, assetID)
+			})
+			parsed.HTML = html
+		} else if strings.Contains(parsed.HTML, imgPlaceholderPrefix) {
+			// 抽不出图片（例如只有 EMF），占位符要清掉。
+			parsed.HTML = imgPlaceholderRegexp.ReplaceAllString(parsed.HTML, "")
+		}
+
+		return ImportResult{HTML: parsed.HTML, Title: stripExt(filename), Format: "docx", Warnings: warnings}, nil
 	case "tex":
 		html, warnings, err := latexToHTML(string(content))
 		if err != nil {
@@ -97,15 +126,25 @@ func stripExt(filename string) string {
 // DOCX → HTML
 // ---------------------------------------------------------------------------
 
-// docxToHTML 解析 Word 文档的正文段落与基础样式。
+// docxResult 是 docx 解析的中间产物。
 //
-// 只处理 OOXML 的 word/document.xml，不处理图片、表格、脚注——
-// 这些在协同编辑器里需要额外的节点类型，超出「把正文带过来」的范围。
-// 遇到不支持的内容会记录 warning，让用户知道哪些没转过来。
-func docxToHTML(content []byte) (string, []string, error) {
+// 图片不直接转成 <img src>：地址要等图片上传到对象存储后才知道，
+// 而解析阶段还没有 docID。因此正文里先放占位符，由 ImportFile 统一替换。
+type docxResult struct {
+	HTML   string
+	Images []docxImage
+	// Warnings 是内容层面的降级提示（与图片上传失败无关）。
+	Warnings []string
+}
+
+// docxToHTML 解析 Word 文档的正文段落、基础样式、表格与图片。
+//
+// 图片以占位符 \x00IMG:{relID}\x00 出现在 HTML 里，由调用方替换成
+// 真实的资源地址。脚注、批注、文本框不在处理范围内。
+func docxToHTML(content []byte) (docxResult, error) {
 	archive, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: 文件不是有效的 docx", ErrValidation)
+		return docxResult{}, fmt.Errorf("%w: 文件不是有效的 docx", ErrValidation)
 	}
 
 	var documentXML []byte
@@ -113,34 +152,33 @@ func docxToHTML(content []byte) (string, []string, error) {
 		if file.Name == "word/document.xml" {
 			reader, err := file.Open()
 			if err != nil {
-				return "", nil, fmt.Errorf("%w: 无法读取文档正文", ErrValidation)
+				return docxResult{}, fmt.Errorf("%w: 无法读取文档正文", ErrValidation)
 			}
 			documentXML, err = io.ReadAll(io.LimitReader(reader, maxImportBytes))
 			_ = reader.Close()
 			if err != nil {
-				return "", nil, fmt.Errorf("%w: 读取文档正文失败", ErrValidation)
+				return docxResult{}, fmt.Errorf("%w: 读取文档正文失败", ErrValidation)
 			}
 			break
 		}
 	}
 	if documentXML == nil {
-		return "", nil, fmt.Errorf("%w: 不是 Word 文档（缺少 word/document.xml）", ErrValidation)
+		return docxResult{}, fmt.Errorf("%w: 不是 Word 文档（缺少 word/document.xml）", ErrValidation)
 	}
 
 	doc, err := parseWordDocument(documentXML)
 	if err != nil {
-		return "", nil, fmt.Errorf("%w: 文档结构无法解析", ErrValidation)
+		return docxResult{}, fmt.Errorf("%w: 文档结构无法解析", ErrValidation)
 	}
 
 	var b strings.Builder
 	var warnings []string
-	hasImage := false
-	hasTable := false
 
 	for _, para := range doc.Body.Paragraphs {
 		style := para.styleID()
 		html := renderWordParagraph(para)
-		if strings.TrimSpace(html) == "" {
+		// 只有图片、没有文字的段落也要保留——否则图片会整段消失。
+		if strings.TrimSpace(html) == "" && !strings.Contains(html, imgPlaceholderPrefix) {
 			continue
 		}
 		switch {
@@ -152,28 +190,30 @@ func docxToHTML(content []byte) (string, []string, error) {
 		default:
 			fmt.Fprintf(&b, "<p>%s</p>", html)
 		}
-		if strings.Contains(html, "<img") {
-			hasImage = true
-		}
-	}
-	for _, table := range doc.Body.Tables {
-		if len(table.Rows) > 0 {
-			hasTable = true
-		}
 	}
 
-	if hasImage {
-		warnings = append(warnings, "文档中的图片未导入（协同编辑器暂不支持内嵌图片）")
+	// 表格：转成编辑器能识别的 HTML <table>。
+	// 单元格里的段落合并成一段文本（Word 的一个单元格可以有多个段落，
+	// 但表格单元格在编辑器里只有一个文本块）。
+	for _, table := range doc.Body.Tables {
+		html, ok := wordTableToHTML(table)
+		if !ok {
+			continue
+		}
+		b.WriteString(html)
 	}
-	if hasTable {
-		warnings = append(warnings, "文档中的表格未导入（可粘贴为纯文本后手动整理）")
+
+	images, imageWarnings, err := extractDocxImages(archive, documentXML)
+	if err != nil {
+		return docxResult{}, err
 	}
+	warnings = append(warnings, imageWarnings...)
 
 	html := b.String()
-	if strings.TrimSpace(html) == "" {
-		return "", warnings, fmt.Errorf("%w: 文档没有可导入的正文", ErrValidation)
+	if strings.TrimSpace(stripTags(html)) == "" && !strings.Contains(html, imgPlaceholderPrefix) {
+		return docxResult{}, fmt.Errorf("%w: 文档没有可导入的正文", ErrValidation)
 	}
-	return html, warnings, nil
+	return docxResult{HTML: html, Images: images, Warnings: warnings}, nil
 }
 
 // wordDocument 是 word/document.xml 的最小投影。
@@ -189,7 +229,15 @@ type wordBody struct {
 }
 
 type wordTable struct {
-	Rows []struct{} `xml:"tr"`
+	Rows []wordTableRow `xml:"tr"`
+}
+
+type wordTableRow struct {
+	Cells []wordTableCell `xml:"tc"`
+}
+
+type wordTableCell struct {
+	Paragraphs []wordParagraph `xml:"p"`
 }
 
 type wordParagraph struct {
@@ -210,6 +258,21 @@ type wordRun struct {
 	Text  string       `xml:"t"`
 	// 换行符 <w:br/>
 	Breaks []struct{} `xml:"br"`
+	// 图片：<w:drawing><wp:inline><a:graphic><a:blip r:embed="rIdN"/>
+	// 只取 blip 上的 embed 属性——那是 Word 关联图片条目的方式。
+	Drawings []wordDrawing `xml:"drawing"`
+}
+
+type wordDrawing struct {
+	Inline *struct {
+		Graphic struct {
+			Data struct {
+				Blip struct {
+					Embed string `xml:"embed,attr"`
+				} `xml:"blip"`
+			} `xml:"graphicData"`
+		} `xml:"graphic"`
+	} `xml:"inline"`
 }
 
 type wordRunProps struct {
@@ -253,6 +316,17 @@ func headingLevel(style string) int {
 func renderWordParagraph(para wordParagraph) string {
 	var b strings.Builder
 	for _, run := range para.Runs {
+		// 图片先输出占位符：地址要等上传完成后才知道。
+		for _, drawing := range run.Drawings {
+			if drawing.Inline == nil {
+				continue
+			}
+			relID := drawing.Inline.Graphic.Data.Blip.Embed
+			if relID != "" {
+				b.WriteString(imgPlaceholder(relID))
+			}
+		}
+
 		text := escapeHTML(run.Text)
 		if text == "" && len(run.Breaks) == 0 {
 			continue
@@ -284,4 +358,40 @@ func escapeHTML(s string) string {
 		">", "&gt;",
 		`"`, "&quot;",
 	).Replace(s)
+}
+
+// wordTableToHTML 把一个 Word 表格转成 HTML <table>。
+//
+// Word 的表格没有表头概念（只有「首行重复」这种排版属性），
+// 因此统一用 <td>。编辑器里用户可以自己把首行改成表头。
+func wordTableToHTML(table wordTable) (string, bool) {
+	if len(table.Rows) == 0 {
+		return "", false
+	}
+	var b strings.Builder
+	b.WriteString("<table><tbody>")
+	wroteRow := false
+	for _, row := range table.Rows {
+		if len(row.Cells) == 0 {
+			continue
+		}
+		b.WriteString("<tr>")
+		for _, cell := range row.Cells {
+			// 一个单元格可能有多个段落；用空格拼接，保留文字但不保留分段。
+			parts := make([]string, 0, len(cell.Paragraphs))
+			for _, para := range cell.Paragraphs {
+				if text := strings.TrimSpace(stripTags(renderWordParagraph(para))); text != "" {
+					parts = append(parts, text)
+				}
+			}
+			fmt.Fprintf(&b, "<td>%s</td>", escapeHTML(strings.Join(parts, " ")))
+		}
+		b.WriteString("</tr>")
+		wroteRow = true
+	}
+	b.WriteString("</tbody></table>")
+	if !wroteRow {
+		return "", false
+	}
+	return b.String(), true
 }

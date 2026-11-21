@@ -4,6 +4,12 @@ import Collaboration from "@tiptap/extension-collaboration";
 import CollaborationCaret from "@tiptap/extension-collaboration-caret";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
+import { BlockMath, InlineMath } from "@tiptap/extension-mathematics";
+import Image from "@tiptap/extension-image";
+import { Table } from "@tiptap/extension-table";
+import { TableRow } from "@tiptap/extension-table-row";
+import { TableCell } from "@tiptap/extension-table-cell";
+import { TableHeader } from "@tiptap/extension-table-header";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Y from "yjs";
 import { HocuspocusProvider } from "@hocuspocus/provider";
@@ -165,6 +171,19 @@ export function DocumentEditor({
       extensions: [
         // CRDT 自己管理历史，必须关掉 StarterKit 的 undoRedo（TipTap 3 的写法）。
         StarterKit.configure({ undoRedo: false }),
+        // 数学公式：块级与行内两种，由 KaTeX 渲染。
+        // 节点名固定为 blockMath / inlineMath，导入时的 HTML 必须用这两个标签，
+        // 否则 TipTap 无法识别。
+        BlockMath,
+        InlineMath,
+        // 图片：导入 Word 时内嵌的图。地址是 /api/v1/documents/{id}/assets/{assetId}，
+        // 由服务端按文档权限校验后转发内容。
+        Image.configure({ inline: false, allowBase64: false }),
+        // 表格：四件套必须一起注册，缺一个都会让表格节点无法解析。
+        Table.configure({ resizable: false }),
+        TableRow,
+        TableHeader,
+        TableCell,
         Collaboration.configure({ document: ydoc }),
         // 光标扩展依赖 provider，必须等 WebSocket 建好再挂。
         ...(providerReady && providerRef.current
