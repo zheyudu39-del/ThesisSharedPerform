@@ -811,10 +811,50 @@ type Annotation struct {
 	DeletedAt  pgtype.Timestamptz `json:"deleted_at"`
 }
 
+type ApiKey struct {
+	ID         pgtype.UUID        `json:"id"`
+	UserID     pgtype.UUID        `json:"user_id"`
+	Name       string             `json:"name"`
+	KeyHash    string             `json:"key_hash"`
+	KeyPrefix  string             `json:"key_prefix"`
+	Scopes     []string           `json:"scopes"`
+	LastUsedAt pgtype.Timestamptz `json:"last_used_at"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt  pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
 type Block struct {
 	BlockerID pgtype.UUID        `json:"blocker_id"`
 	BlockedID pgtype.UUID        `json:"blocked_id"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type Collection struct {
+	ID          pgtype.UUID        `json:"id"`
+	Slug        string             `json:"slug"`
+	Title       string             `json:"title"`
+	Description *string            `json:"description"`
+	CoverKey    *string            `json:"cover_key"`
+	CuratorID   pgtype.UUID        `json:"curator_id"`
+	Visibility  PostVisibility     `json:"visibility"`
+	StartsAt    pgtype.Timestamptz `json:"starts_at"`
+	EndsAt      pgtype.Timestamptz `json:"ends_at"`
+	ItemCount   int32              `json:"item_count"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	DeletedAt   pgtype.Timestamptz `json:"deleted_at"`
+}
+
+type CollectionItem struct {
+	ID           pgtype.UUID        `json:"id"`
+	CollectionID pgtype.UUID        `json:"collection_id"`
+	PostID       pgtype.UUID        `json:"post_id"`
+	PaperID      pgtype.UUID        `json:"paper_id"`
+	Note         *string            `json:"note"`
+	Position     int32              `json:"position"`
+	AddedBy      pgtype.UUID        `json:"added_by"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
 type Comment struct {

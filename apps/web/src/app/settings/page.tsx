@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { ApiKeyPanel } from "@/components/ApiKeyPanel";
 import { useAuth } from "@/components/AuthProvider";
 import { RequireAuth } from "@/components/RequireAuth";
 import { SiteHeader } from "@/components/SiteHeader";
@@ -344,6 +345,11 @@ function SettingsForm() {
           )}
         </div>
       </form>
+
+      {/* 开放 API：与个人资料无关，单独成块，避免混进资料表单的提交逻辑。 */}
+      <div className="mt-10">
+        <ApiKeyPanel />
+      </div>
     </main>
   );
 }

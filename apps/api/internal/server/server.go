@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thesis-shared/api/internal/config"
 	"github.com/thesis-shared/api/internal/content"
+	"github.com/thesis-shared/api/internal/curation"
 	"github.com/thesis-shared/api/internal/doc"
 	"github.com/thesis-shared/api/internal/file"
 	"github.com/thesis-shared/api/internal/group"
@@ -17,6 +18,7 @@ import (
 	"github.com/thesis-shared/api/internal/identity"
 	appmiddleware "github.com/thesis-shared/api/internal/middleware"
 	"github.com/thesis-shared/api/internal/notify"
+	"github.com/thesis-shared/api/internal/openapi"
 	"github.com/thesis-shared/api/internal/paper"
 	"github.com/thesis-shared/api/internal/search"
 	"github.com/thesis-shared/api/internal/storage"
@@ -73,6 +75,20 @@ func New(d Deps) *http.Server {
 	docSvc := doc.NewService(d.Pool)
 	documents := handler.NewDocumentHandler(docSvc, tokens, d.Config.WSPublicURL)
 
+	// 精选策展。PRD §1.2 明确不做个性化推荐，精选流靠人工判断，
+	// 因此策展资格（运营 / 大V）在服务层判定，路由本身只需区分读与写。
+	curationSvc := curation.NewService(d.Pool)
+	curations := handler.NewCurationHandler(curationSvc)
+
+	// 开放 API：密钥管理与只读数据端点。
+	// 数据端点挂在 /openapi/v1 独立前缀下，用 X-API-Key 认证，不读 Cookie，
+	// 因此与内部 API 的 CSRF 体系完全隔离。
+	openapiSvc := openapi.NewService(d.Pool)
+	openAPI := handler.NewOpenAPIHandler(openapiSvc, paperSvc, contentSvc, authService)
+	// 每把密钥每分钟 60 次：既够第三方程序做增量同步，
+	// 又能挡住被滥用时的流量。
+	openAPILimiter := appmiddleware.NewRateLimiter(60, time.Minute)
+
 	// 限流：登录/注册是暴力破解与 Argon2 资源耗尽的主要入口。
 	// 每分钟每 IP 最多 10 次认证尝试（对应 PRD §7.3 安全设计中的登录限流）。
 	authLimiter := appmiddleware.NewRateLimiter(10, time.Minute)
@@ -101,6 +117,10 @@ func New(d Deps) *http.Server {
 			// 只读：无需 CSRF。
 			r.Get("/users/me", auth.Me)
 			r.Get("/feed", contents.Feed)
+
+			// 开放 API 密钥只读：只返回元数据（前缀、scopes、最后使用时间），
+			// 不含明文或哈希，因此与其它只读接口一样不需要 CSRF。
+			r.Get("/api-keys", openAPI.ListKeys)
 
 			// 通知中心只读：通知天然属于个人数据，匿名没有读取语义。
 			r.Get("/notifications", notifications.List)
@@ -162,10 +182,28 @@ func New(d Deps) *http.Server {
 				r.Patch("/documents/{id}", documents.Update)
 				r.Delete("/documents/{id}", documents.Delete)
 				r.Post("/documents/{id}/snapshots", documents.CreateSnapshot)
+				// 导出：正文由前端从 TipTap 取出 HTML 提交，服务端转 Word/Markdown/LaTeX。
+				// 要求 editor 及以上，viewer 只能读不能导出（PRD D-08）。
+				r.Post("/documents/{id}/export", documents.Export)
 				r.Post("/documents/{id}/annotations", documents.CreateAnnotation)
 				r.Patch("/documents/{id}/annotations/{aid}", documents.UpdateAnnotation)
 				r.Patch("/documents/{id}/members/{userId}", documents.UpdateMember)
 				r.Delete("/documents/{id}/members/{userId}", documents.RemoveMember)
+
+				// 策展写操作。策展资格（运营 / 认证大V）与「只能改自己的集合」
+				// 由 curation 服务层判定，返回 403 而非 404：策展集是公开内容，
+				// 隐藏其存在性没有意义，明确告知「无权限」更有助于运营排查。
+				r.Post("/collections", curations.Create)
+				r.Patch("/collections/{slug}", curations.Update)
+				r.Delete("/collections/{slug}", curations.Delete)
+				r.Post("/collections/{slug}/items", curations.AddItem)
+				r.Patch("/collections/{slug}/items/{itemId}", curations.ReorderItem)
+				r.Delete("/collections/{slug}/items/{itemId}", curations.RemoveItem)
+
+				// 开放 API 密钥的写操作：走普通会话认证 + CSRF。
+				// 密钥本身是长期凭据，创建与撤销都必须确认是本站发起的操作。
+				r.Post("/api-keys", openAPI.CreateKey)
+				r.Delete("/api-keys/{id}", openAPI.RevokeKey)
 
 				// 通知写操作：标记已读会改变个人数据，必须带 CSRF 令牌。
 				r.Post("/notifications/{id}/read", notifications.MarkRead)
@@ -209,12 +247,32 @@ func New(d Deps) *http.Server {
 
 			// 统一检索：公开可读，匿名也能搜；结果只来自已索引的公开实体。
 			r.Get("/search", searches.Query)
+
+			// 精选策展：公开可读，供 SSR 与分享链接使用。
+			// 未上架 / 已下架的集合由服务层对非策展人返回 404。
+			r.Get("/collections", curations.List)
+			r.Get("/collections/{slug}", curations.Get)
 		})
 
 		// 公开个人主页：无需登录，供分享链接与搜索引擎抓取（PRD A-03 / §7.4）。
 		// 令牌可选：有效会话会让响应附带 following，供关注按钮正确初始化。
 		// 必须最后注册：chi 中静态段优先于参数段，/users/me 仍会命中上面的路由。
 		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/users/{handle}", users.GetPublic)
+	})
+
+	// 开放 API：独立前缀，用 X-API-Key 认证。
+	//
+	// 不挂在 /api/v1 下有两个原因：
+	//   1. 版本节奏不同——开放 API 一旦发布就要长期兼容，内部 API 可以随产品迭代；
+	//   2. 认证方式不同——Cookie 与 CSRF 的整套机制在这里都不适用。
+	r.Route("/openapi/v1", func(r chi.Router) {
+		r.Use(appmiddleware.APIKeyAuth(openapiSvc))
+		r.Use(appmiddleware.LimitByAPIKey(openAPILimiter))
+
+		r.With(appmiddleware.RequireScope(openapi.ScopeReadPapers)).Get("/papers", openAPI.ListPapers)
+		r.With(appmiddleware.RequireScope(openapi.ScopeReadPapers)).Get("/papers/{id}", openAPI.GetPaper)
+		r.With(appmiddleware.RequireScope(openapi.ScopeReadPosts)).Get("/posts", openAPI.ListPosts)
+		r.With(appmiddleware.RequireScope(openapi.ScopeReadUsers)).Get("/users/{handle}", openAPI.GetUser)
 	})
 
 	return &http.Server{

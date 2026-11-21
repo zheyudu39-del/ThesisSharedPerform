@@ -2,7 +2,7 @@
 
 import Collaboration from "@tiptap/extension-collaboration";
 import CollaborationCaret from "@tiptap/extension-collaboration-caret";
-import { EditorContent, useEditor } from "@tiptap/react";
+import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Y from "yjs";
@@ -33,6 +33,14 @@ export type DocumentEditorProps = {
   userName: string;
   /** 用户 ID，用于生成稳定的光标颜色。 */
   userId: string;
+  /**
+   * 编辑器就绪回调。
+   *
+   * 导出需要 editor.getHTML()：正文是 Yjs 二进制，服务端没有解析实现，
+   * 浏览器里的 TipTap 实例是最可靠的序列化入口。父组件通过这个回调
+   * 拿到实例，避免把整个编辑器状态提升到父级。
+   */
+  onReady?: (editor: Editor | null) => void;
 };
 
 /** 由用户 ID 派生一个稳定且饱和度适中的光标颜色。 */
@@ -45,7 +53,13 @@ function cursorColor(userId: string): string {
   return `hsl(${hue} 65% 48%)`;
 }
 
-export function DocumentEditor({ documentId, role, userName, userId }: DocumentEditorProps) {
+export function DocumentEditor({
+  documentId,
+  role,
+  userName,
+  userId,
+  onReady,
+}: DocumentEditorProps) {
   const [collab, setCollab] = useState<CollabToken | null>(null);
   const [state, setState] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -143,6 +157,13 @@ export function DocumentEditor({ documentId, role, userName, userId }: DocumentE
     },
     [ydoc, editable, providerReady],
   );
+
+  // 把编辑器实例交给父组件（用于导出）。卸载时回调 null，
+  // 防止父组件在编辑器销毁后仍持有过期实例。
+  useEffect(() => {
+    onReady?.(editor ?? null);
+    return () => onReady?.(null);
+  }, [editor, onReady]);
 
   return (
     <div className="flex flex-col gap-3">

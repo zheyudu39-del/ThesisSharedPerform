@@ -31,6 +31,12 @@ export function SiteHeader() {
             关注流
           </Link>
           <Link
+            href="/collections"
+            className="rounded-[6px] px-3 py-1.5 hover:bg-surface-2 hover:text-ink"
+          >
+            精选
+          </Link>
+          <Link
             href="/papers"
             className="rounded-[6px] px-3 py-1.5 hover:bg-surface-2 hover:text-ink"
           >

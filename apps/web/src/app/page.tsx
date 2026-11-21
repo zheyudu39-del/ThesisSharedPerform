@@ -202,13 +202,24 @@ export default function HomePage() {
         <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_280px]">
           {/* 信息流 */}
           <div className="flex min-w-0 flex-col gap-4">
-            {/* 三档流切换 */}
+            {/* 三档流切换 + 精选入口 */}
             <div className="flex flex-wrap items-center gap-1.5">
               {STREAMS.map((s) => (
                 <Tab key={s} active={stream === s} onClick={() => changeStream(s)}>
                   {STREAM_LABEL[s]}
                 </Tab>
               ))}
+              {/*
+                精选是「策展集」而不是帖子流，数据结构与分页方式都不同，
+                因此做成跳转到 /collections 的入口，而不是第四个 feed stream。
+                混进来会让这里的游标、去重与插入逻辑全部需要分支处理。
+              */}
+              <Link
+                href="/collections"
+                className="rounded-[6px] px-3 py-1.5 text-[0.84rem] font-medium text-ink-2 transition-colors hover:bg-surface-2 hover:text-ink"
+              >
+                精选
+              </Link>
               <span className="ml-2 font-mono text-[0.7rem] text-ink-3">{STREAM_HINT[stream]}</span>
             </div>
 

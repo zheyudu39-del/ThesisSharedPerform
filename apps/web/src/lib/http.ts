@@ -159,3 +159,70 @@ export async function apiFetch<T = unknown>(
 
   return parsed as T;
 }
+
+/**
+ * 发起一次返回二进制的请求（如文件导出），成功时返回原始 Response。
+ *
+ * 与 {@link apiFetch} 的差别：
+ * - 不解析 JSON，调用方自行处理 blob；
+ * - 失败时仍按统一错误体解析，抛出 ApiError，让页面能展示服务端给出的原因
+ *   （例如「无权限导出」），而不是一句笼统的「下载失败」。
+ */
+export async function apiFetchRaw(
+  path: string,
+  options: ApiFetchOptions = {},
+): Promise<Response> {
+  const method = options.method ?? "GET";
+  const headers = new Headers(options.headers);
+  headers.set("Accept", "*/*");
+
+  if (isMutating(method)) {
+    const csrf = readCSRFCookie();
+    if (csrf) headers.set(CSRF_HEADER, csrf);
+  }
+
+  let body: BodyInit | undefined = options.rawBody;
+  if (body === undefined && options.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+    body = JSON.stringify(options.body);
+  }
+
+  const controller = new AbortController();
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    // 导出需要遍历整篇文档并打包 zip，给比普通请求更宽的窗口。
+    options.timeoutMs ?? 60000,
+  );
+
+  let response: Response;
+  try {
+    response = await fetch(`/api/v1${path}`, {
+      method,
+      headers,
+      body,
+      signal: controller.signal,
+      credentials: "include",
+      cache: "no-store",
+    });
+  } catch {
+    throw new ApiError("network_error", "无法连接服务器，请检查网络后重试。", 0);
+  } finally {
+    window.clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    let parsed: unknown = null;
+    if (text) {
+      try {
+        parsed = JSON.parse(text) as unknown;
+      } catch {
+        parsed = null;
+      }
+    }
+    const { code, message } = extractError(parsed, response.status);
+    throw new ApiError(code, message, response.status);
+  }
+
+  return response;
+}

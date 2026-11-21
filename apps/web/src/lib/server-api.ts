@@ -404,3 +404,99 @@ export const fetchDocument = cache(
     };
   },
 );
+
+/* -------------------------------------------------------------------------- */
+/* 策展                                                                        */
+/* -------------------------------------------------------------------------- */
+
+export type ServerCollectionItem = {
+  id: string;
+  position: number;
+  note: string;
+  post: PostDTO | null;
+  paper: PaperDTO | null;
+  addedBy: { id: string; name: string; handle: string };
+  createdAt: string;
+};
+
+export type ServerCollection = {
+  id: string;
+  slug: string;
+  title: string;
+  description: string;
+  coverUrl: string | null;
+  curator: { id: string; name: string; handle: string; verifyType: string };
+  itemCount: number;
+  startsAt: string;
+  endsAt: string | null;
+  createdAt: string;
+  canEdit: boolean;
+};
+
+function normalizeCollection(value: unknown): ServerCollection | null {
+  if (!isRecord(value)) return null;
+  const id = str(value.id);
+  const slug = str(value.slug);
+  if (!id || !slug) return null;
+
+  const curator = isRecord(value.curator) ? value.curator : {};
+  return {
+    id,
+    slug,
+    title: str(value.title) || "未命名策展集",
+    description: str(value.description),
+    coverUrl: typeof value.coverUrl === "string" && value.coverUrl ? value.coverUrl : null,
+    curator: {
+      id: str(curator.id),
+      name: str(curator.name) || "未知用户",
+      handle: str(curator.handle),
+      verifyType: str(curator.verifyType),
+    },
+    itemCount: num(value.itemCount),
+    startsAt: str(value.startsAt),
+    endsAt: typeof value.endsAt === "string" ? value.endsAt : null,
+    createdAt: str(value.createdAt),
+    canEdit: value.canEdit === true,
+  };
+}
+
+function normalizeCollectionItem(value: unknown): ServerCollectionItem | null {
+  if (!isRecord(value) || typeof value.id !== "string") return null;
+  const addedBy = isRecord(value.addedBy) ? value.addedBy : {};
+  return {
+    id: value.id,
+    position: num(value.position),
+    note: str(value.note),
+    post: normalizePost(value.post),
+    paper: normalizePaper(value.paper),
+    addedBy: {
+      id: str(addedBy.id),
+      name: str(addedBy.name) || "未知用户",
+      handle: str(addedBy.handle),
+    },
+    createdAt: str(value.createdAt),
+  };
+}
+
+/**
+ * 读取策展集详情（公开读）。
+ *
+ * 必须 no-store：canEdit 随会话变化，且未上架的集合对非策展人返回 404；
+ * 若进入共享 Data Cache，会把某个策展人的编辑入口渲染给别人。
+ */
+export const fetchCollection = cache(
+  async (
+    slug: string,
+  ): Promise<{ collection: ServerCollection; items: ServerCollectionItem[] } | null> => {
+    const body = await fetchJSON(`/collections/${encodeURIComponent(slug)}`, false);
+    if (!isRecord(body)) return null;
+    const collection = normalizeCollection(body.collection);
+    if (!collection) return null;
+    const items = Array.isArray(body.items)
+      ? body.items
+          .map(normalizeCollectionItem)
+          .filter((item): item is ServerCollectionItem => item !== null)
+      : [];
+    return { collection, items };
+  },
+);

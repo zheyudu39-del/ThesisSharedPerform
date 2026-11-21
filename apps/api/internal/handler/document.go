@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -431,4 +433,63 @@ func (h *DocumentHandler) CollabToken(w http.ResponseWriter, r *http.Request) {
 		"token": token,
 		"wsUrl": h.wsPublicURL,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// 导出
+// ---------------------------------------------------------------------------
+
+// Export 处理 POST /api/v1/documents/{id}/export。
+//
+// 正文由前端从 TipTap 取出 HTML 后提交（见 doc.ExportHTML 的说明），
+// 服务端只做格式转换与权限校验，并以附件形式返回。
+// 权限要求 editor 及以上：PRD D-08 规定无权限用户只读且不可导出。
+func (h *DocumentHandler) Export(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+	docID, ok := docIDFromPath(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		HTML   string `json:"html"`
+		Format string `json:"format"`
+	}
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	result, err := h.service.ExportHTML(r.Context(), userID, docID, req.HTML, req.Format)
+	if err != nil {
+		writeDocError(w, err)
+		return
+	}
+	writeDownload(w, result.Filename, result.ContentType, result.Content)
+}
+
+// writeDownload 以附件形式返回文件。
+//
+// filename* 用 RFC 5987 编码，保证中文文件名在各浏览器下正确显示；
+// 同时保留 ASCII 的 filename 作为老客户端的兜底。
+func writeDownload(w http.ResponseWriter, filename, contentType string, content []byte) {
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", contentDisposition(filename))
+	w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(content)
+}
+
+// contentDisposition 构造兼容的附件头。
+func contentDisposition(filename string) string {
+	ascii := make([]rune, 0, len(filename))
+	for _, r := range filename {
+		if r < 128 && r != '"' && r != '\\' {
+			ascii = append(ascii, r)
+		} else {
+			ascii = append(ascii, '_')
+		}
+	}
+	return `attachment; filename="` + string(ascii) + `"; filename*=UTF-8''` + url.PathEscape(filename)
 }

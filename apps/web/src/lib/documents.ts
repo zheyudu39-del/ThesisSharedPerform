@@ -3,7 +3,7 @@
  * 走统一 apiFetch（Cookie 会话 + CSRF 头）。
  */
 
-import { apiFetch } from "@/lib/http";
+import { apiFetch, apiFetchRaw } from "@/lib/http";
 
 export type DocRole = "owner" | "editor" | "viewer";
 
@@ -137,4 +137,63 @@ export async function updateAnnotation(
  */
 export async function getCollabToken(id: string): Promise<CollabToken> {
   return apiFetch(`/documents/${encodeURIComponent(id)}/collab-token`);
+}
+
+/* -------------------------------------------------------------------------- */
+/* 导出                                                                        */
+/* -------------------------------------------------------------------------- */
+
+export type ExportFormat = "docx" | "md" | "tex";
+
+export const EXPORT_FORMAT_LABEL: Record<ExportFormat, string> = {
+  docx: "Word (.docx)",
+  md: "Markdown (.md)",
+  tex: "LaTeX (.tex)",
+};
+
+/**
+ * 导出文档。
+ *
+ * 正文由调用方从 TipTap 取出 HTML 后传入：正文是 Yjs 二进制（CRDT），
+ * 服务端没有解析实现，浏览器里的编辑器实例是最可靠的序列化入口。
+ * 服务端只做格式转换与权限校验（要求 editor 及以上）。
+ *
+ * 直接触发浏览器下载：用 Blob + 临时 <a download>，
+ * 因为响应带 Content-Disposition，普通 fetch 拿不到浏览器的下载行为。
+ */
+export async function exportDocument(
+  id: string,
+  html: string,
+  format: ExportFormat,
+  title: string,
+): Promise<void> {
+  const response = await apiFetchRaw(`/documents/${encodeURIComponent(id)}/export`, {
+    method: "POST",
+    body: { html, format },
+  });
+
+  const blob = await response.blob();
+  const filename = `${sanitizeFilename(title)}.${format}`;
+  const url = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    // 立刻回收：下载已由浏览器接管，保留 URL 只会泄漏内存。
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** 与后端 safeFilename 保持一致的保守清洗，避免文件名里出现路径分隔符。 */
+function sanitizeFilename(title: string): string {
+  const cleaned = title
+    .trim()
+    .replace(/[\/:*?"<>|]/g, "")
+    .slice(0, 60)
+    .trim();
+  return cleaned || "document";
 }

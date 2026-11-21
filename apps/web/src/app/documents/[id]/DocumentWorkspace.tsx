@@ -1,10 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
+import type { Editor } from "@tiptap/react";
 import { useAuth } from "@/components/AuthProvider";
 import { DocumentEditor } from "@/components/DocumentEditor";
 import { DocSidebar } from "@/components/DocSidebar";
-import { updateDocument, type DocRole, type DocumentDTO } from "@/lib/documents";
+import {
+  EXPORT_FORMAT_LABEL,
+  exportDocument,
+  updateDocument,
+  type DocRole,
+  type DocumentDTO,
+  type ExportFormat,
+} from "@/lib/documents";
 
 /**
  * 文档工作区：标题栏 + 编辑器 + 侧栏（快照与批注）。
@@ -26,7 +34,35 @@ export function DocumentWorkspace({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // 导出：持有编辑器实例，点击导出时取 getHTML()。
+  const [editor, setEditor] = useState<Editor | null>(null);
+  const [exporting, setExporting] = useState<ExportFormat | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+
   const canEdit = role === "owner" || role === "editor";
+
+  // 传给 DocumentEditor 的回调必须稳定，否则编辑器每次渲染都会重挂 effect。
+  const handleEditorReady = useCallback((instance: Editor | null) => {
+    setEditor(instance);
+  }, []);
+
+  async function handleExport(format: ExportFormat) {
+    if (!editor) {
+      setExportError("编辑器尚未就绪，请稍后再试。");
+      return;
+    }
+    setExporting(format);
+    setExportError(null);
+    try {
+      // 取当前文档的 HTML。正文是 Yjs 二进制，服务端无法解析，
+      // 浏览器里的编辑器实例是最可靠的序列化入口。
+      await exportDocument(doc.id, editor.getHTML(), format, doc.title);
+    } catch (err) {
+      setExportError(err instanceof Error ? err.message : "导出失败，请稍后重试。");
+    } finally {
+      setExporting(null);
+    }
+  }
 
   async function commitTitle() {
     const next = title.trim();
@@ -109,6 +145,30 @@ export function DocumentWorkspace({
           </div>
         )}
         {error && <p className="mt-2 text-[0.78rem] text-danger">{error}</p>}
+
+        {/*
+          导出：PRD D-07（保留章节结构与公式）+ D-08（无权限用户只读且不可导出）。
+          viewer 不渲染入口——服务端也会拒绝，这里只是不给无意义的按钮。
+        */}
+        {canEdit && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[0.68rem] tracking-[0.08em] text-ink-3 uppercase">
+              导出
+            </span>
+            {(Object.keys(EXPORT_FORMAT_LABEL) as ExportFormat[]).map((format) => (
+              <button
+                key={format}
+                type="button"
+                disabled={exporting !== null || !editor}
+                onClick={() => void handleExport(format)}
+                className="rounded-[3px] border border-line-strong px-2.5 py-1 text-[0.74rem] text-ink-2 hover:border-ink-3 hover:text-ink disabled:opacity-50"
+              >
+                {exporting === format ? "导出中…" : EXPORT_FORMAT_LABEL[format]}
+              </button>
+            ))}
+            {exportError && <span className="text-[0.74rem] text-danger">{exportError}</span>}
+          </div>
+        )}
       </header>
 
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]">
@@ -117,6 +177,7 @@ export function DocumentWorkspace({
           role={role}
           userName={user?.name ?? "匿名用户"}
           userId={user?.id ?? "anonymous"}
+          onReady={handleEditorReady}
         />
         <DocSidebar documentId={doc.id} canEdit={canEdit} />
       </div>
