@@ -10,13 +10,17 @@ RETURNING *;
 SELECT * FROM files WHERE id = $1;
 
 -- name: UpdateFileStatus :one
+-- $2 出现两次：赋给 enum 列、又与字面量比较。必须显式写成同一个
+-- file_status 类型，否则 PostgreSQL 会从两处推断出不同类型
+-- （enum 与 text），参数化查询直接报 42P08。
 UPDATE files
-SET status       = $2,
-    error_reason = $3,
+SET status       = sqlc.arg('status')::file_status,
+    error_reason = sqlc.narg('error_reason'),
     page_count   = COALESCE(sqlc.narg('page_count')::integer, page_count),
     cover_key    = COALESCE(sqlc.narg('cover_key'), cover_key),
-    ready_at     = CASE WHEN $2 = 'ready' THEN now() ELSE ready_at END
-WHERE id = $1
+    ready_at     = CASE WHEN sqlc.arg('status')::file_status = 'ready'::file_status
+                        THEN now() ELSE ready_at END
+WHERE id = sqlc.arg('id')
 RETURNING *;
 
 -- name: MarkFileUploaded :one

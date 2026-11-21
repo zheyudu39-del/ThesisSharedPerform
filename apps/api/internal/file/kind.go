@@ -34,6 +34,14 @@ var allowedMIME = map[string]db.FileKind{
 
 	"text/markdown": db.FileKindMarkdown,
 	"text/plain":    db.FileKindMarkdown,
+
+	// LaTeX 源文件。浏览器对 .tex 的 File.type 常见三种取值：
+	// 空串、text/x-tex、application/x-tex（Chrome/Firefox 不一），
+	// 前端会按扩展名兜底成 text/x-tex，这里三种都收。
+	// file_kind 枚举里本来就有 latex，不需要加迁移。
+	"text/x-tex":         db.FileKindLatex,
+	"application/x-tex":  db.FileKindLatex,
+	"application/x-latex": db.FileKindLatex,
 }
 
 // MIMEKind 返回 MIME 对应的 file_kind；不在白名单时 ok=false。
@@ -87,6 +95,8 @@ func extFor(mime string) string {
 		return ".md"
 	case "text/plain":
 		return ".txt"
+	case "text/x-tex", "application/x-tex", "application/x-latex":
+		return ".tex"
 	default:
 		return ""
 	}

@@ -42,6 +42,10 @@ export const ACCEPTED_MIME_TYPES = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "text/markdown",
   "text/plain",
+  // LaTeX 源文件：浏览器给的 File.type 不稳定，前端按扩展名兜底成 text/x-tex。
+  "text/x-tex",
+  "application/x-tex",
+  "application/x-latex",
 ] as const;
 
 const ACCEPTED_MIME_SET = new Set<string>(ACCEPTED_MIME_TYPES);
@@ -62,11 +66,13 @@ const EXTENSION_MIME: Record<string, string> = {
   md: "text/markdown",
   markdown: "text/markdown",
   txt: "text/plain",
+  tex: "text/x-tex",
+  latex: "text/x-tex",
 };
 
 /** `<input type="file" accept>` 的值；与白名单一一对应。 */
 export const ACCEPT_ATTRIBUTE =
-  ".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.md,.markdown,.txt";
+  ".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.md,.markdown,.txt,.tex,.latex";
 
 export type FileStatus =
   | "pending"
@@ -469,11 +475,18 @@ export type UploadValidation =
 export function resolveMime(file: File): string {
   const type = (file.type || "").toLowerCase();
   if (type === "text/x-markdown") return "text/markdown";
-  if (type && ACCEPTED_MIME_SET.has(type)) return type;
 
+  // LaTeX 优先按扩展名判定：浏览器对 .tex 常报 text/plain，
+  // 若先信任 type 会被归成 markdown，之后在文件库里就找不回「这是 LaTeX 源文件」。
   const extension = file.name.includes(".")
     ? file.name.slice(file.name.lastIndexOf(".") + 1).toLowerCase()
     : "";
+  if (extension === "tex" || extension === "latex") {
+    return "text/x-tex";
+  }
+
+  if (type && ACCEPTED_MIME_SET.has(type)) return type;
+
   const fromExtension = EXTENSION_MIME[extension];
   if (fromExtension) return fromExtension;
 
@@ -496,7 +509,8 @@ export function validateUpload(file: File): UploadValidation {
   if (!ACCEPTED_MIME_SET.has(mime)) {
     return {
       ok: false,
-      message: "不支持这种文件类型。支持 PDF、图片、Office 文档、Markdown 与纯文本。",
+      message:
+        "不支持这种文件类型。支持 PDF、图片、Word / PPT / Excel、Markdown、纯文本与 LaTeX（.tex）。",
     };
   }
 

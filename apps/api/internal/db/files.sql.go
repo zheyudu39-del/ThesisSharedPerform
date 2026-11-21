@@ -373,30 +373,34 @@ func (q *Queries) SetFileTextLayerKey(ctx context.Context, arg SetFileTextLayerK
 
 const updateFileStatus = `-- name: UpdateFileStatus :one
 UPDATE files
-SET status       = $2,
-    error_reason = $3,
-    page_count   = COALESCE($4::integer, page_count),
-    cover_key    = COALESCE($5, cover_key),
-    ready_at     = CASE WHEN $2 = 'ready' THEN now() ELSE ready_at END
-WHERE id = $1
+SET status       = $1::file_status,
+    error_reason = $2,
+    page_count   = COALESCE($3::integer, page_count),
+    cover_key    = COALESCE($4, cover_key),
+    ready_at     = CASE WHEN $1::file_status = 'ready'::file_status
+                        THEN now() ELSE ready_at END
+WHERE id = $5
 RETURNING id, owner_id, storage_key, original_name, mime, kind, size_bytes, sha256, status, scan_result, page_count, cover_key, text_layer_key, error_reason, retry_count, visibility, created_at, ready_at
 `
 
 type UpdateFileStatusParams struct {
-	ID          pgtype.UUID `json:"id"`
 	Status      FileStatus  `json:"status"`
 	ErrorReason *string     `json:"error_reason"`
 	PageCount   *int32      `json:"page_count"`
 	CoverKey    *string     `json:"cover_key"`
+	ID          pgtype.UUID `json:"id"`
 }
 
+// $2 出现两次：赋给 enum 列、又与字面量比较。必须显式写成同一个
+// file_status 类型，否则 PostgreSQL 会从两处推断出不同类型
+// （enum 与 text），参数化查询直接报 42P08。
 func (q *Queries) UpdateFileStatus(ctx context.Context, arg UpdateFileStatusParams) (File, error) {
 	row := q.db.QueryRow(ctx, updateFileStatus,
-		arg.ID,
 		arg.Status,
 		arg.ErrorReason,
 		arg.PageCount,
 		arg.CoverKey,
+		arg.ID,
 	)
 	var i File
 	err := row.Scan(

@@ -152,7 +152,9 @@ export function FileUploader({
     if (inputRef.current) inputRef.current.value = "";
   }
 
-  const hintText = hint ?? `支持 PDF、图片、Office、Markdown · 单文件 ≤ ${formatBytes(MAX_FILE_BYTES)}`;
+  const hintText =
+    hint ??
+    `支持 PDF、图片、Word / PPT / Excel、Markdown、LaTeX · 单文件 ≤ ${formatBytes(MAX_FILE_BYTES)}`;
 
   return (
     <div className="flex flex-col gap-2">
