@@ -36,7 +36,7 @@ func (p *pgGroupFilesQuerier) GetGroupFileContext(ctx context.Context, slug stri
 	return GroupFileContext{
 		GroupID: fromPG(row.GroupID),
 		OwnerID: fromPG(row.OwnerID),
-		MyRole:  row.MyRole,
+		MyRole:  anyToString(row.MyRole),
 	}, nil
 }
 
@@ -207,3 +207,12 @@ func optionalString(value string) *string {
 // ON CONFLICT DO NOTHING 命中冲突时 sqlc 的 :one 返回 pgx.ErrNoRows，
 // 对业务层来说就是「已存在」。
 func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
+
+// anyToString 把 sqlc 对「COALESCE(enum::text, '')」推断出的 interface{}
+// 安全地转成字符串。空值按空串处理——业务层用空串表示「没有这个角色」。
+func anyToString(value interface{}) string {
+	if s, ok := value.(string); ok {
+		return s
+	}
+	return ""
+}

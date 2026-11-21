@@ -141,6 +141,22 @@ func (q *Queries) DeleteDocMember(ctx context.Context, arg DeleteDocMemberParams
 	return result.RowsAffected(), nil
 }
 
+const deleteSnapshot = `-- name: DeleteSnapshot :exec
+DELETE FROM doc_snapshots WHERE doc_id = $1 AND version = $2
+`
+
+type DeleteSnapshotParams struct {
+	DocID   pgtype.UUID `json:"doc_id"`
+	Version int32       `json:"version"`
+}
+
+// 快照内容写入失败时回滚元数据行：留下一条指向空对象的记录，
+// 会让用户在列表里看到一份永远打不开的快照。
+func (q *Queries) DeleteSnapshot(ctx context.Context, arg DeleteSnapshotParams) error {
+	_, err := q.db.Exec(ctx, deleteSnapshot, arg.DocID, arg.Version)
+	return err
+}
+
 const getAnnotation = `-- name: GetAnnotation :one
 SELECT a.id, a.target_type, a.target_id, a.author_id, a.anchor, a.quoted_text,
        a.content, a.resolved_at, a.resolved_by, a.created_at, a.deleted_at,

@@ -76,6 +76,9 @@ func New(d Deps) *http.Server {
 	// 文档元数据与权限。正文同步与快照落盘由 Node 协同服务负责，
 	// 这里只提供 REST 侧的 CRUD、成员覆盖、快照登记与批注。
 	docSvc := doc.NewService(d.Pool)
+	// 回滚快照后，协同服务内存里的 Y.Doc 仍是旧内容。注入内部通道，
+	// 让它主动卸载文档，在线客户端自动重连后即拿到回滚版本。
+	docSvc.SetCollabReloader(doc.NewWSReloader(d.Config.WSInternalURL, d.Config.JWTSecret))
 	documents := handler.NewDocumentHandler(docSvc, tokens, d.Config.WSPublicURL)
 
 	// 精选策展。PRD §1.2 明确不做个性化推荐，精选流靠人工判断，

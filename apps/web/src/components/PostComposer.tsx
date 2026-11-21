@@ -2,7 +2,9 @@
 
 import { useId, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
+import { FileUploader } from "@/components/FileUploader";
 import { AuthError } from "@/lib/auth";
+import type { FileDTO } from "@/lib/files";
 import { resolvePaper } from "@/lib/papers";
 import {
   createPost,
@@ -48,6 +50,8 @@ export function PostComposer({
   const [content, setContent] = useState(initialContent);
   const [paperInput, setPaperInput] = useState("");
   const [visibility, setVisibility] = useState<PostVisibility>("public");
+  // 附件：发帖前上传完成，提交时把 fileId 一起发给后端。
+  const [attachments, setAttachments] = useState<FileDTO[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -96,11 +100,13 @@ export function PostComposer({
       };
       if (paperId) input.paperId = paperId;
       if (repostOf) input.repostOf = repostOf;
+      if (attachments.length > 0) input.fileIds = attachments.map((f) => f.id);
 
       const post = await createPost(input);
       setContent("");
       setPaperInput("");
       setVisibility("public");
+      setAttachments([]);
       setNotice(
         repostOf
           ? "已转发。"
@@ -215,6 +221,39 @@ export function PostComposer({
             ))}
           </select>
         </div>
+      </div>
+
+      {/* 附件：上传完成的文件会随帖发布，并可在群组页一键存入文件库。 */}
+      <div className="mt-3">
+        <FileUploader
+          compact
+          disabled={submitting}
+          hint="附件（可选）：上传 PDF / 图片，随帖发布"
+          onUploaded={(file) => setAttachments((prev) => [...prev, file])}
+        />
+        {attachments.length > 0 && (
+          <ul className="mt-2 flex flex-col gap-1">
+            {attachments.map((file) => (
+              <li
+                key={file.id}
+                className="flex items-center gap-2 rounded-[3px] border border-line bg-surface-2 px-2 py-1"
+              >
+                <span className="min-w-0 flex-1 truncate font-mono text-[0.72rem] text-ink-2">
+                  {file.originalName}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setAttachments((prev) => prev.filter((f) => f.id !== file.id))
+                  }
+                  className="shrink-0 text-[0.72rem] text-ink-3 hover:text-danger"
+                >
+                  移除
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">

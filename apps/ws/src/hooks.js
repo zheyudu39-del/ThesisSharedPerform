@@ -1,5 +1,6 @@
 import { AuthError, checkDocumentAccess, extractToken, verifyJWT } from './auth.js'
 import { loadDocument, storeDocument, updateJournal } from './persistence.js'
+import { isStoreSuppressed } from './reload.js'
 import { logger } from './logger.js'
 
 /**
@@ -98,6 +99,14 @@ async function onLoadDocument({ documentName }) {
 
 /** debounce 后落全量快照。抛错时 Hocuspocus 会把文档留在内存并重试，不会丢数据。 */
 async function onStoreDocument({ documentName, document, lastContext }) {
+  // 回滚期间不落快照：内存里的 Y.Doc 仍是回滚前的内容，
+  // 写下去会把刚回滚的记录覆盖回去。见 reload.js 的说明。
+  if (isStoreSuppressed(documentName)) {
+    // 不清除标记：回滚窗口内可能触发多次存储，由 reload.js 在卸载完成后统一清除。
+    logger.info(`跳过快照（回滚中）doc=${documentName}`)
+    return
+  }
+
   // 先把待合并的增量刷盘，再写快照：快照读取的 watermark 才能覆盖它们。
   await updateJournal.flush(documentName).catch((err) => {
     logger.warn(`快照前刷新增量失败 doc=${documentName}: ${err.message}`)

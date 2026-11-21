@@ -101,8 +101,14 @@ export type RestoreResult = {
   restoredFrom: number;
   /** 回滚动作产生的新版本号（单调递增，不会被旧版本号覆盖）。 */
   newVersion: number;
-  /** 恒为 true：协同服务内存里的 Y.Doc 需要重新加载才生效。 */
+  /**
+   * 为 true 表示协同服务里的内存副本没能立刻失效，用户需要手动刷新。
+   * 为 false（正常路径）表示服务端已主动卸载文档，在线用户会在
+   * 客户端自动重连后拿到回滚版本，无需任何操作。
+   */
   requiresReconnect: boolean;
+  /** 自动重载失败时的原因；requiresReconnect 为 false 时不存在。 */
+  reloadError?: string;
 };
 
 /**

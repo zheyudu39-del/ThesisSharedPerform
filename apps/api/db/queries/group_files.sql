@@ -7,8 +7,12 @@
 --   * 标签用 text[] + GIN 索引，按标签过滤用包含查询即可。
 
 -- name: GetGroupFileContext :one
--- 群组解析与当前用户角色一次取回；my_role 为 NULL 表示非群成员。
-SELECT g.id AS group_id, g.owner_id, gm.role::text AS my_role
+-- 群组解析与当前用户角色一次取回；my_role 为空串表示非群成员。
+--
+-- 用 COALESCE 而不是让 NULL 直出：非成员是最常见的调用场景（探测权限），
+-- 让它在 sqlc 里映射成 pgtype.Text / *string 会迫使每个调用点都判空；
+-- 领域层本来就用空串表示「无角色」，这里直接对齐。
+SELECT g.id AS group_id, g.owner_id, COALESCE(gm.role::text, '') AS my_role
 FROM groups g
 LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = sqlc.arg('user_id')
 WHERE g.slug = sqlc.arg('slug') AND g.deleted_at IS NULL;

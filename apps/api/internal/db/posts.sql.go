@@ -341,6 +341,40 @@ func (q *Queries) IncrementRepostCount(ctx context.Context, id pgtype.UUID) erro
 	return err
 }
 
+const linkPostAttachment = `-- name: LinkPostAttachment :exec
+INSERT INTO post_attachments (post_id, file_id, position)
+SELECT $1, $2, $3
+WHERE EXISTS (
+    SELECT 1 FROM files f
+     WHERE f.id = $2 AND f.owner_id = $4
+       AND f.status NOT IN ('failed', 'rejected')
+)
+ON CONFLICT (post_id, file_id) DO NOTHING
+`
+
+type LinkPostAttachmentParams struct {
+	PostID   pgtype.UUID `json:"post_id"`
+	FileID   pgtype.UUID `json:"file_id"`
+	Position int16       `json:"position"`
+	OwnerID  pgtype.UUID `json:"owner_id"`
+}
+
+// 帖子附件：发帖时把文件挂到帖子上。
+//
+// 只排除 failed 与 rejected，不要求 ready：PDF 是异步转码的，
+// 用户上传后往往立刻发帖，此时状态还是 transcoding。要求 ready 会让
+// 「刚传完就发帖」这个最常见的操作静默丢掉附件。真正打不开的文件
+// 在读取时（ListPostAttachments）再按 ready 过滤。
+func (q *Queries) LinkPostAttachment(ctx context.Context, arg LinkPostAttachmentParams) error {
+	_, err := q.db.Exec(ctx, linkPostAttachment,
+		arg.PostID,
+		arg.FileID,
+		arg.Position,
+		arg.OwnerID,
+	)
+	return err
+}
+
 const linkPostTag = `-- name: LinkPostTag :exec
 INSERT INTO post_tags (post_id, tag_id) VALUES ($1, $2)
 ON CONFLICT DO NOTHING
@@ -514,6 +548,56 @@ func (q *Queries) ListAllFeed(ctx context.Context, arg ListAllFeedParams) ([]Lis
 			&i.RepostPaperCitationCount,
 			&i.RepostPaperMetaSource,
 			&i.RepostPaperCreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAttachmentsForPosts = `-- name: ListAttachmentsForPosts :many
+SELECT pa.post_id, f.id, f.original_name, f.mime, f.kind::text AS kind,
+       f.size_bytes, f.page_count, pa.position
+FROM post_attachments pa
+JOIN files f ON f.id = pa.file_id
+WHERE pa.post_id = ANY($1::uuid[]) AND f.status NOT IN ('failed', 'rejected')
+ORDER BY pa.post_id, pa.position ASC, pa.id ASC
+`
+
+type ListAttachmentsForPostsRow struct {
+	PostID       pgtype.UUID `json:"post_id"`
+	ID           pgtype.UUID `json:"id"`
+	OriginalName string      `json:"original_name"`
+	Mime         string      `json:"mime"`
+	Kind         string      `json:"kind"`
+	SizeBytes    int64       `json:"size_bytes"`
+	PageCount    *int32      `json:"page_count"`
+	Position     int16       `json:"position"`
+}
+
+// 信息流批量取附件：一条 IN 查询，避免每张卡片单独查一次（N+1）。
+func (q *Queries) ListAttachmentsForPosts(ctx context.Context, dollar_1 []pgtype.UUID) ([]ListAttachmentsForPostsRow, error) {
+	rows, err := q.db.Query(ctx, listAttachmentsForPosts, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAttachmentsForPostsRow
+	for rows.Next() {
+		var i ListAttachmentsForPostsRow
+		if err := rows.Scan(
+			&i.PostID,
+			&i.ID,
+			&i.OriginalName,
+			&i.Mime,
+			&i.Kind,
+			&i.SizeBytes,
+			&i.PageCount,
+			&i.Position,
 		); err != nil {
 			return nil, err
 		}
@@ -858,6 +942,54 @@ func (q *Queries) ListHotFeed(ctx context.Context, arg ListHotFeedParams) ([]Lis
 			&i.RepostPaperCitationCount,
 			&i.RepostPaperMetaSource,
 			&i.RepostPaperCreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPostAttachments = `-- name: ListPostAttachments :many
+SELECT f.id, f.original_name, f.mime, f.kind::text AS kind,
+       f.size_bytes, f.page_count, pa.position
+FROM post_attachments pa
+JOIN files f ON f.id = pa.file_id
+WHERE pa.post_id = $1 AND f.status NOT IN ('failed', 'rejected')
+ORDER BY pa.position ASC, pa.id ASC
+`
+
+type ListPostAttachmentsRow struct {
+	ID           pgtype.UUID `json:"id"`
+	OriginalName string      `json:"original_name"`
+	Mime         string      `json:"mime"`
+	Kind         string      `json:"kind"`
+	SizeBytes    int64       `json:"size_bytes"`
+	PageCount    *int32      `json:"page_count"`
+	Position     int16       `json:"position"`
+}
+
+// 帖子附件列表。只返回就绪的文件，半成品对读者没有意义。
+func (q *Queries) ListPostAttachments(ctx context.Context, postID pgtype.UUID) ([]ListPostAttachmentsRow, error) {
+	rows, err := q.db.Query(ctx, listPostAttachments, postID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPostAttachmentsRow
+	for rows.Next() {
+		var i ListPostAttachmentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.OriginalName,
+			&i.Mime,
+			&i.Kind,
+			&i.SizeBytes,
+			&i.PageCount,
+			&i.Position,
 		); err != nil {
 			return nil, err
 		}

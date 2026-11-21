@@ -198,6 +198,40 @@ SELECT gm.role FROM group_members gm
 JOIN groups g ON g.id = gm.group_id
 WHERE gm.group_id = $1 AND gm.user_id = $2 AND g.deleted_at IS NULL;
 
+-- name: LinkPostAttachment :exec
+-- 帖子附件：发帖时把文件挂到帖子上。
+--
+-- 只排除 failed 与 rejected，不要求 ready：PDF 是异步转码的，
+-- 用户上传后往往立刻发帖，此时状态还是 transcoding。要求 ready 会让
+-- 「刚传完就发帖」这个最常见的操作静默丢掉附件。真正打不开的文件
+-- 在读取时（ListPostAttachments）再按 ready 过滤。
+INSERT INTO post_attachments (post_id, file_id, position)
+SELECT $1, $2, $3
+WHERE EXISTS (
+    SELECT 1 FROM files f
+     WHERE f.id = $2 AND f.owner_id = $4
+       AND f.status NOT IN ('failed', 'rejected')
+)
+ON CONFLICT (post_id, file_id) DO NOTHING;
+
+-- name: ListPostAttachments :many
+-- 帖子附件列表。只返回就绪的文件，半成品对读者没有意义。
+SELECT f.id, f.original_name, f.mime, f.kind::text AS kind,
+       f.size_bytes, f.page_count, pa.position
+FROM post_attachments pa
+JOIN files f ON f.id = pa.file_id
+WHERE pa.post_id = $1 AND f.status NOT IN ('failed', 'rejected')
+ORDER BY pa.position ASC, pa.id ASC;
+
+-- name: ListAttachmentsForPosts :many
+-- 信息流批量取附件：一条 IN 查询，避免每张卡片单独查一次（N+1）。
+SELECT pa.post_id, f.id, f.original_name, f.mime, f.kind::text AS kind,
+       f.size_bytes, f.page_count, pa.position
+FROM post_attachments pa
+JOIN files f ON f.id = pa.file_id
+WHERE pa.post_id = ANY($1::uuid[]) AND f.status NOT IN ('failed', 'rejected')
+ORDER BY pa.post_id, pa.position ASC, pa.id ASC;
+
 -- name: GetPostAuthorAndType :one
 -- 编辑/删除前的权限判定依据：作者用于区分「本人」与「他人」，
 -- type 用于决定正文能否为空（转发可以只转发不附言，原创帖不行），

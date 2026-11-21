@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -26,6 +27,8 @@ type createPostRequest struct {
 	GroupID    *string  `json:"groupId"`
 	Visibility string   `json:"visibility"`
 	Tags       []string `json:"tags"`
+	// FileIDs 是随帖发布的附件（须已上传完成且属于作者）。
+	FileIDs []string `json:"fileIds"`
 }
 
 func (h *ContentHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
@@ -50,7 +53,18 @@ func (h *ContentHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	post, err := h.service.CreatePost(r.Context(), userID, content.CreatePostInput{Content: req.Content, PaperID: paperID, RepostOf: repostOf, GroupID: groupID, Visibility: req.Visibility, Tags: req.Tags})
+	// 附件 ID 逐个解析：格式错误直接 422，而不是静默丢弃——
+	// 用户以为挂上了图，实际没有，比报错更让人困惑。
+	fileIDs := make([]uuid.UUID, 0, len(req.FileIDs))
+	for _, raw := range req.FileIDs {
+		parsed, err := uuid.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			WriteError(w, http.StatusUnprocessableEntity, "validation_error", "附件 ID 格式不正确")
+			return
+		}
+		fileIDs = append(fileIDs, parsed)
+	}
+	post, err := h.service.CreatePost(r.Context(), userID, content.CreatePostInput{Content: req.Content, PaperID: paperID, RepostOf: repostOf, GroupID: groupID, Visibility: req.Visibility, Tags: req.Tags, FileIDs: fileIDs})
 	if err != nil {
 		writeContentError(w, err)
 		return

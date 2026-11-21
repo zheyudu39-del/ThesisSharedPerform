@@ -142,7 +142,7 @@ func (q *Queries) GetGroupFile(ctx context.Context, arg GetGroupFileParams) (Get
 
 const getGroupFileContext = `-- name: GetGroupFileContext :one
 
-SELECT g.id AS group_id, g.owner_id, gm.role::text AS my_role
+SELECT g.id AS group_id, g.owner_id, COALESCE(gm.role::text, '') AS my_role
 FROM groups g
 LEFT JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = $1
 WHERE g.slug = $2 AND g.deleted_at IS NULL
@@ -156,7 +156,7 @@ type GetGroupFileContextParams struct {
 type GetGroupFileContextRow struct {
 	GroupID pgtype.UUID `json:"group_id"`
 	OwnerID pgtype.UUID `json:"owner_id"`
-	MyRole  string      `json:"my_role"`
+	MyRole  interface{} `json:"my_role"`
 }
 
 // 群文件库（PRD G-05）。
@@ -167,7 +167,11 @@ type GetGroupFileContextRow struct {
 //   - 从帖子存入时记录 post_id，便于回到原始讨论上下文。
 //   - 标签用 text[] + GIN 索引，按标签过滤用包含查询即可。
 //
-// 群组解析与当前用户角色一次取回；my_role 为 NULL 表示非群成员。
+// 群组解析与当前用户角色一次取回；my_role 为空串表示非群成员。
+//
+// 用 COALESCE 而不是让 NULL 直出：非成员是最常见的调用场景（探测权限），
+// 让它在 sqlc 里映射成 pgtype.Text / *string 会迫使每个调用点都判空；
+// 领域层本来就用空串表示「无角色」，这里直接对齐。
 func (q *Queries) GetGroupFileContext(ctx context.Context, arg GetGroupFileContextParams) (GetGroupFileContextRow, error) {
 	row := q.db.QueryRow(ctx, getGroupFileContext, arg.UserID, arg.Slug)
 	var i GetGroupFileContextRow

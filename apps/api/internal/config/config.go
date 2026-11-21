@@ -29,6 +29,9 @@ type Config struct {
 	JWTTTL    time.Duration
 	// WSPublicURL 是浏览器连接协同服务的地址（ws:// 或 wss://）。
 	WSPublicURL string
+	// WSInternalURL 是协同服务的内部 HTTP 地址，供 API 调用运维接口
+	// （如快照回滚后强制卸载文档）。留空表示不启用这类跨进程协作。
+	WSInternalURL string
 }
 
 // devJWTSecret 仅供本地开发使用。生产环境必须显式提供 JWT_SECRET，
@@ -60,6 +63,8 @@ func Load() Config {
 		JWTSecret:   getenv("JWT_SECRET", devJWTSecret),
 		JWTTTL:      time.Hour * 168,
 		WSPublicURL: getenv("WS_PUBLIC_URL", "ws://localhost:1234"),
+		// 默认指向本地健康检查端口：开发环境下两个进程常在同一台机器。
+		WSInternalURL: getenv("WS_INTERNAL_URL", "http://localhost:1235"),
 	}
 }
 

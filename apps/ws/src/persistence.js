@@ -269,6 +269,73 @@ export async function storeDocument(docId, ydoc) {
 }
 
 /**
+ * 删除文档的全部增量日志（回滚时用）。
+ *
+ * 回滚的语义是「丢弃当前内容、回到某个历史版本」，因此快照之后累积的
+ * 增量必须一并清掉：loadDocument 会按 seq 回放它们，不清就会把回滚前的
+ * 编辑重新拼回去。
+ *
+ * 先删元数据行再删对象：即使删对象失败，也只是留下孤儿对象，
+ * 不会出现「元数据指向已删除对象」的加载错误。
+ *
+ * @returns {Promise<number>} 清理的增量条数
+ */
+export async function clearUpdates(docId) {
+  if (!UUID_RE.test(String(docId ?? ''))) {
+    throw new Error(`文档标识无效: ${docId}`)
+  }
+  const { rows } = await getPool().query(
+    `DELETE FROM doc_updates WHERE doc_id = $1 RETURNING storage_key`,
+    [docId],
+  )
+  for (const row of rows) {
+    void removeObject(row.storage_key)
+  }
+  // 水位线归零：新编辑的 seq 从 1 重新开始，避免与已删除的序号混淆。
+  await getPool().query(`UPDATE documents SET latest_update_seq = 0 WHERE id = $1`, [docId])
+  return rows.length
+}
+
+/**
+ * 把 Y.Doc 写成**指定版本**的快照。
+ *
+ * 与 storeDocument 的区别：storeDocument 自己分配版本号（协同服务自动落盘
+ * 时用），而这里由调用方（REST 的「创建快照」）已经分配好版本并插入了
+ * 元数据行，我们只负责把二进制写到对应的 storage_key。
+ *
+ * 不重复 BumpDocumentSnapshot：版本号是 REST 在事务里递增的，
+ * 这里再 bump 会让两边的版本号错位。
+ */
+export async function storeDocumentAtVersion(docId, ydoc, version) {
+  if (!UUID_RE.test(String(docId ?? ''))) {
+    throw new Error(`文档标识无效: ${docId}`)
+  }
+  if (!(ydoc instanceof Y.Doc)) {
+    throw new Error('storeDocumentAtVersion 需要 Y.Doc 实例')
+  }
+  if (!Number.isInteger(version) || version <= 0) {
+    throw new Error(`版本号无效: ${version}`)
+  }
+
+  const state = Y.encodeStateAsUpdate(ydoc)
+  const buffer = Buffer.from(state)
+  const key = snapshotKey(docId, version)
+
+  // 先落对象：REST 那边的元数据行已经存在（它先插入再调用我们），
+  // 所以这里失败时必须让调用方知道，由它回滚或标记。
+  await putObject(key, buffer)
+
+  // 回填真实的字节数——元数据行插入时还不知道大小。
+  await getPool().query(
+    `UPDATE doc_snapshots SET storage_key = $3, size_bytes = $4
+      WHERE doc_id = $1 AND version = $2`,
+    [docId, version, key, buffer.length],
+  )
+
+  return { version, key, sizeBytes: buffer.length }
+}
+
+/**
  * 追加一条增量（best-effort）。
  *
  * seq 由 documents.latest_update_seq 原子自增获得，key 按规范拼出。

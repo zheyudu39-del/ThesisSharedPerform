@@ -185,6 +185,19 @@ function normalizePost(value: unknown): PostDTO | null {
     liked: value.liked === true,
     bookmarked: value.bookmarked === true,
     tags: strList(value.tags),
+    attachments: Array.isArray(value.attachments)
+      ? value.attachments
+          .filter(isRecord)
+          .map((a) => ({
+            fileId: str(a.fileId),
+            name: str(a.name) || "附件",
+            mime: str(a.mime),
+            kind: str(a.kind),
+            sizeBytes: num(a.sizeBytes),
+            pageCount: num(a.pageCount),
+          }))
+          .filter((a) => a.fileId !== "")
+      : [],
   };
 }
 

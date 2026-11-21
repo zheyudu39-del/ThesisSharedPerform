@@ -25,6 +25,9 @@ import { getCollabToken, type CollabToken } from "@/lib/documents";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "unavailable";
 
+/** 与 apps/ws/src/reload.js 的 ROLLBACK_SIGNAL 保持一致。 */
+const ROLLBACK_SIGNAL = "thesis:rollback";
+
 export type DocumentEditorProps = {
   documentId: string;
   /** 当前用户在文档中的角色。viewer 只能看。 */
@@ -66,7 +69,15 @@ export function DocumentEditor({
   const [peers, setPeers] = useState<string[]>([]);
 
   const editable = role === "owner" || role === "editor";
-  const ydoc = useMemo(() => new Y.Doc(), []);
+
+  // generation 每次「回滚重建」自增，用于强制重建 Y.Doc 与 provider。
+  //
+  // 为什么不能用 useMemo 固定一个 Y.Doc：Yjs 是 CRDT，本地文档保留着
+  // 自己的编辑历史。回滚后若只重连，Yjs 会把服务端快照与本地状态**合并**，
+  // 本地编辑依然胜出——用户看到的还是回滚前的内容。
+  // 只有丢弃本地 Y.Doc、从空文档重新同步，回滚才真正生效。
+  const [generation, setGeneration] = useState(0);
+  const ydoc = useMemo(() => new Y.Doc(), [generation]);
   const providerRef = useRef<HocuspocusProvider | null>(null);
   const [providerReady, setProviderReady] = useState(false);
 
@@ -106,6 +117,18 @@ export function DocumentEditor({
       onAuthenticationFailed: () => {
         setState("unavailable");
         setError("协同鉴权失败，编辑器已降级为只读。");
+      },
+      // 服务端回滚快照后广播此信号。丢弃本地 Y.Doc 并重建 provider，
+      // 从服务端的最新快照重新同步——这是回滚能真正生效的唯一途径。
+      onStateless: ({ payload }) => {
+        if (payload !== ROLLBACK_SIGNAL) return;
+        setState("connecting");
+        setError(null);
+        // 断开当前连接；下一个 effect 会用新的 Y.Doc 重新建连。
+        providerRef.current?.destroy();
+        providerRef.current = null;
+        setProviderReady(false);
+        setGeneration((g) => g + 1);
       },
     });
 

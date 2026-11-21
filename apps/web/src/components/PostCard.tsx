@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { PaperPreviewCard } from "./PaperPreviewCard";
+import { SaveToGroupFile } from "./SaveToGroupFile";
 import { ReportDialog } from "./ReportDialog";
 import { SealBadge } from "./SealBadge";
 import { AuthError } from "@/lib/auth";
@@ -42,11 +43,16 @@ export type PostCardProps = {
   onDeleted?: (id: string) => void;
   /** 详情页：不再引导跳转到自身详情。 */
   detail?: boolean;
+  /**
+   * 群组上下文。仅当帖子属于某个群时传入，用于给附件渲染
+   * 「存入群文件库」入口——公开时间线里的帖子无处可存。
+   */
+  groupSlug?: string;
 };
 
 type PendingAction = "like" | "bookmark" | null;
 
-export function PostCard({ post, onPatch, onDeleted, detail = false }: PostCardProps) {
+export function PostCard({ post, onPatch, onDeleted, detail = false, groupSlug }: PostCardProps) {
   const { status, user } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
@@ -511,6 +517,30 @@ export function PostCard({ post, onPatch, onDeleted, detail = false }: PostCardP
         </div>
       )}
 
+      {/* 附件：显示文件名与大小，并在群组上下文里提供「存入文件库」入口。 */}
+      {post.attachments.length > 0 && (
+        <div className="mb-3 flex flex-col gap-1.5">
+          {post.attachments.map((file) => (
+            <div
+              key={file.fileId}
+              className="flex flex-wrap items-center gap-2 rounded-[6px] border border-line bg-surface-2 px-3 py-1.5"
+            >
+              <span className="min-w-0 flex-1 truncate text-[0.82rem] text-ink-2">
+                {file.name}
+              </span>
+              <span className="shrink-0 font-mono text-[0.68rem] text-ink-3">
+                {formatBytes(file.sizeBytes)}
+                {file.pageCount > 0 ? ` · ${file.pageCount} 页` : ""}
+              </span>
+              {/* 「存入文件库」只在群组页出现：公开时间线的帖子不属于任何群。 */}
+              {groupSlug && (
+                <SaveToGroupFile groupSlug={groupSlug} fileId={file.fileId} />
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* 话题标签 */}
       {post.tags.length > 0 && (
         <div className="mb-3 flex flex-wrap gap-2">
@@ -734,4 +764,12 @@ function FlagIcon() {
       <path d="M5 5h9.5l-1.4 3.2L14.5 12H5" />
     </svg>
   );
+}
+
+/** 人类可读的文件大小。 */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }

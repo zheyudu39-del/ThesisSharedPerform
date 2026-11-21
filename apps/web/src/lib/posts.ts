@@ -52,6 +52,18 @@ export type PostDTO = {
   liked: boolean;
   bookmarked: boolean;
   tags: string[];
+  /** 帖子附件（PDF / 图片等）。空数组表示没有。 */
+  attachments: PostAttachment[];
+};
+
+/** 帖子附件。与后端 content.Attachment 对齐。 */
+export type PostAttachment = {
+  fileId: string;
+  name: string;
+  mime: string;
+  kind: string;
+  sizeBytes: number;
+  pageCount: number;
 };
 
 export type CommentDTO = {
@@ -82,6 +94,8 @@ export type CreatePostInput = {
   groupId?: string;
   visibility: PostVisibility;
   tags?: string[];
+  /** 随帖发布的附件 ID（须已上传完成）。 */
+  fileIds?: string[];
 };
 
 export type CreateCommentInput = {
@@ -227,6 +241,19 @@ export function normalizePost(value: unknown): PostDTO {
     liked: value.liked === true,
     bookmarked: value.bookmarked === true,
     tags: Array.isArray(value.tags) ? value.tags.filter((t): t is string => typeof t === "string") : [],
+    attachments: Array.isArray(value.attachments)
+      ? value.attachments
+          .filter((a): a is Record<string, unknown> => typeof a === "object" && a !== null)
+          .map((a) => ({
+            fileId: str(a.fileId),
+            name: str(a.name) || "附件",
+            mime: str(a.mime),
+            kind: str(a.kind),
+            sizeBytes: num(a.sizeBytes),
+            pageCount: num(a.pageCount),
+          }))
+          .filter((a) => a.fileId !== "")
+      : [],
   };
 }
 
@@ -360,6 +387,7 @@ export async function createPost(input: CreatePostInput): Promise<PostDTO> {
   if (input.repostOf) payload.repostOf = input.repostOf;
   if (input.groupId) payload.groupId = input.groupId;
   if (input.tags && input.tags.length > 0) payload.tags = input.tags;
+  if (input.fileIds && input.fileIds.length > 0) payload.fileIds = input.fileIds;
 
   const body = await apiFetch("/posts", { method: "POST", body: JSON.stringify(payload) });
   if (!isRecord(body) || !("post" in body)) throw invalidResponse();

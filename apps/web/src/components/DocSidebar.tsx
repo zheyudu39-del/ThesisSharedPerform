@@ -26,8 +26,15 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
   const [creating, setCreating] = useState(false);
   // 正在回滚的版本号；非 null 时禁用所有回滚按钮，避免并发触发。
   const [restoring, setRestoring] = useState<number | null>(null);
-  // 回滚成功后的提示。不回滚提示「已生效」——必须刷新才能看到旧版本。
-  const [restored, setRestored] = useState<{ from: number; to: number } | null>(null);
+  // 回滚成功后的提示。需要区分两种情况：
+  //   自动生效（服务端已卸载内存文档）—— 告诉用户马上就能看到；
+  //   仍需刷新（协同服务不可用或连接没排空）—— 如实提示，并给刷新按钮。
+  const [restored, setRestored] = useState<{
+    from: number;
+    to: number;
+    requiresReconnect: boolean;
+    reloadError?: string;
+  } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -63,12 +70,12 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
   /**
    * 回滚到指定版本。
    *
-   * 二次确认是必要的：回滚会改变所有人看到的正文，而且协同服务内存里的
-   * Y.Doc 不会自动重置，必须刷新页面才会加载旧版本——这两点都不能让
-   * 用户「点一下才发现」。
+   * 二次确认是必要的：回滚会改变所有人看到的正文，不能让人「点一下才发现」。
+   * 正常情况下服务端会让协同服务卸载内存文档，在线客户端自动重连后即可看到
+   * 旧版本；只有重载失败时才需要手动刷新——提示文案据此区分。
    */
   async function handleRestore(version: number) {
-    if (!window.confirm(`确定回滚到版本 ${version}？当前正文将被替换，且需要刷新页面才会生效。`)) {
+    if (!window.confirm(`确定回滚到版本 ${version}？当前正文将被替换。`)) {
       return;
     }
     setRestoring(version);
@@ -76,7 +83,12 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
     setRestored(null);
     try {
       const result = await restoreSnapshot(documentId, version);
-      setRestored({ from: result.restoredFrom, to: result.newVersion });
+      setRestored({
+        from: result.restoredFrom,
+        to: result.newVersion,
+        requiresReconnect: result.requiresReconnect,
+        reloadError: result.reloadError,
+      });
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "回滚失败");
@@ -158,25 +170,37 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
           )}
 
           {/*
-            回滚成功提示：明确说「需要刷新」，而不是假装已经生效。
-            协同服务（apps/ws）把 Y.Doc 放在内存里，REST 侧改快照指针
-            不会影响已连接的会话，只有重新加载文档才会读到旧版本。
+            回滚结果提示。
+            正常路径：服务端已让协同服务卸载内存文档，在线客户端会自动重连
+            并从新快照重建，所以告诉用户「已生效」即可。
+            降级路径（协同服务未配置 / 连接未排空）：如实说明需要刷新，
+            并给出刷新按钮——不假装已经生效。
           */}
-          {restored && (
-            <div className="mt-3 rounded-[6px] border border-warn/40 bg-warn-wash px-3 py-2">
-              <p className="text-[0.75rem] leading-relaxed text-warn">
-                已标记回滚到版本 {restored.from}（生成新版本 {restored.to}）。
-                协同编辑器仍持有回滚前的正文，请刷新页面以加载该版本。
-              </p>
-              <button
-                type="button"
-                onClick={() => window.location.reload()}
-                className="mt-1.5 rounded-[3px] bg-warn px-2 py-0.5 text-[0.72rem] font-semibold text-white hover:opacity-90"
-              >
-                刷新页面
-              </button>
-            </div>
-          )}
+          {restored &&
+            (restored.requiresReconnect ? (
+              <div className="mt-3 rounded-[6px] border border-warn/40 bg-warn-wash px-3 py-2">
+                <p className="text-[0.75rem] leading-relaxed text-warn">
+                  已回滚到版本 {restored.from}（生成新版本 {restored.to}），
+                  但协同编辑器仍持有旧正文
+                  {restored.reloadError ? `：${restored.reloadError}` : ""}。
+                  请刷新页面以加载该版本。
+                </p>
+                <button
+                  type="button"
+                  onClick={() => window.location.reload()}
+                  className="mt-1.5 rounded-[3px] bg-warn px-2 py-0.5 text-[0.72rem] font-semibold text-white hover:opacity-90"
+                >
+                  刷新页面
+                </button>
+              </div>
+            ) : (
+              <div className="mt-3 rounded-[6px] border border-good/40 bg-good-wash px-3 py-2">
+                <p className="text-[0.75rem] leading-relaxed text-good">
+                  已回滚到版本 {restored.from}（生成新版本 {restored.to}）。
+                  协同服务已卸载旧副本，编辑器会自动重连并载入该版本。
+                </p>
+              </div>
+            ))}
         </section>
       )}
 

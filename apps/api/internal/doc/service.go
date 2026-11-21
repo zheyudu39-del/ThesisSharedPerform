@@ -99,6 +99,7 @@ type Querier interface {
 	DeleteDocMember(context.Context, db.DeleteDocMemberParams) (int64, error)
 
 	BumpDocumentSnapshot(context.Context, pgtype.UUID) (int32, error)
+	DeleteSnapshot(context.Context, db.DeleteSnapshotParams) error
 	InsertSnapshot(context.Context, db.InsertSnapshotParams) (db.DocSnapshot, error)
 	ListSnapshots(context.Context, db.ListSnapshotsParams) ([]db.ListSnapshotsRow, error)
 
@@ -172,6 +173,9 @@ type Service struct {
 	editors editorQuerier
 	// snapshots 用于回滚时读取指定版本的存储键。
 	snapshots snapshotQuerier
+	// reloader 通知协同服务卸载内存中的文档；为 nil 表示未配置，
+	// 此时回滚会降级为「需要用户手动刷新」。
+	reloader CollabReloader
 }
 
 // NewService 构造服务。pool 为 nil 时只读路径可用（测试替身场景）。
@@ -187,6 +191,10 @@ func NewService(pool *pgxpool.Pool) *Service {
 
 // SetNotifier 注入通知实现；不注入时文档编辑不产生通知。
 func (s *Service) SetNotifier(notifier Notifier) { s.notifier = notifier }
+
+// SetCollabReloader 注入协同服务客户端。
+// 由 server 包在组装时调用：doc 包不关心对端是 HTTP 还是别的什么。
+func (s *Service) SetCollabReloader(reloader CollabReloader) { s.reloader = reloader }
 
 // newServiceWithQuerier 用于测试注入替身。
 func newServiceWithQuerier(queries Querier) *Service {
@@ -620,6 +628,30 @@ func (s *Service) CreateSnapshot(ctx context.Context, userID, docID uuid.UUID, l
 	if err != nil {
 		return Snapshot{}, err
 	}
+
+	// 元数据行已就位，现在让协同服务把真实正文写进这个版本的 storage_key。
+	//
+	// 这一步不能省：正文是 Yjs 二进制，只有协同服务知道当前内容。
+	// 早期实现只写元数据行（size_bytes=0、storage_key 指向不存在的对象），
+	// 「回滚」回去自然是空文档。
+	//
+	// 失败时把刚插入的元数据行删掉——留下一条指向空对象的记录，
+	// 会让用户在列表里看到一份永远打不开的快照。
+	if s.reloader != nil {
+		size, err := s.reloader.SnapshotDocument(ctx, docID, created.Version)
+		if err != nil {
+			if delErr := s.withTx(ctx, func(q Querier) error {
+				return q.DeleteSnapshot(ctx, db.DeleteSnapshotParams{
+					DocID: uuidParam(docID), Version: created.Version,
+				})
+			}); delErr != nil {
+				slog.Error("回滚快照元数据失败", "docId", docID, "version", created.Version, "err", delErr)
+			}
+			return Snapshot{}, fmt.Errorf("快照内容写入失败: %w", err)
+		}
+		created.SizeBytes = size
+	}
+
 	return Snapshot{
 		Version:   created.Version,
 		Label:     stringValue(created.Label),
@@ -637,9 +669,15 @@ func (s *Service) CreateSnapshot(ctx context.Context, userID, docID uuid.UUID, l
 // 由协同服务按新的 latest_snapshot 重新加载。这里诚实地告诉前端这一点，
 // 而不是假装「回滚即时生效」。
 type RestoreResult struct {
-	RestoredFrom      int32 `json:"restoredFrom"`
-	NewVersion        int32 `json:"newVersion"`
-	RequiresReconnect bool  `json:"requiresReconnect"`
+	RestoredFrom int32 `json:"restoredFrom"`
+	NewVersion   int32 `json:"newVersion"`
+	// RequiresReconnect 为 true 表示协同服务里的内存副本没能立刻失效，
+	// 用户需要手动刷新才能看到回滚后的内容。
+	// 为 false 表示服务端已主动卸载文档，在线用户会在客户端自动重连后
+	// 拿到新版本——这是正常路径。
+	RequiresReconnect bool `json:"requiresReconnect"`
+	// ReloadError 在自动重载失败时给出原因，便于前端展示具体提示。
+	ReloadError string `json:"reloadError,omitempty"`
 }
 
 // SnapshotContent 是下载快照正文的结果（Yjs 全量状态）。
@@ -725,11 +763,27 @@ func (s *Service) RestoreSnapshot(ctx context.Context, userID, docID uuid.UUID, 
 		return RestoreResult{}, err
 	}
 
-	return RestoreResult{
+	// 数据库与对象存储已经指向旧版本，但协同服务内存里的 Y.Doc 还是新的。
+	// 主动让对端卸载它：在线客户端会收到可恢复的断开，随后自动重连，
+	// 重连时从最新快照重建 —— 这正是我们要的「回滚立即生效」。
+	//
+	// 失败不视为回滚失败：数据层面已经回滚，只是在线用户需要手动刷新。
+	// 如实返回原因，而不是假装成功。
+	result := RestoreResult{
 		RestoredFrom:      version,
 		NewVersion:        created.Version,
-		RequiresReconnect: true,
-	}, nil
+		RequiresReconnect: false,
+	}
+	if s.reloader == nil {
+		result.RequiresReconnect = true
+		result.ReloadError = "协同服务未配置，请刷新页面以加载该版本"
+		return result, nil
+	}
+	if err := s.reloader.ReloadDocument(ctx, docID); err != nil {
+		result.RequiresReconnect = true
+		result.ReloadError = err.Error()
+	}
+	return result, nil
 }
 
 // loadSnapshot 读取指定版本的快照记录；不存在时返回 ErrNotFound。

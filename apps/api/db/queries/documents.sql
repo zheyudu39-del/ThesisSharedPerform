@@ -143,6 +143,11 @@ LIMIT sqlc.arg('limit');
 -- 因此清理历史快照前必须确认没有其他记录仍在引用同一个 storage_key。
 SELECT * FROM doc_snapshots WHERE doc_id = $1 AND version = $2;
 
+-- name: DeleteSnapshot :exec
+-- 快照内容写入失败时回滚元数据行：留下一条指向空对象的记录，
+-- 会让用户在列表里看到一份永远打不开的快照。
+DELETE FROM doc_snapshots WHERE doc_id = $1 AND version = $2;
+
 -- ---------------------------------------------------------------------------
 -- 批注（annotations）
 -- ---------------------------------------------------------------------------

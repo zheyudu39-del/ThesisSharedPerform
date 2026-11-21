@@ -75,6 +75,20 @@ type Post struct {
 	Liked        bool           `json:"liked"`
 	Bookmarked   bool           `json:"bookmarked"`
 	Tags         []string       `json:"tags"`
+	// Attachments 是帖子附带的文件（PDF / 图片等）。
+	// 前端据此渲染「存入群文件库」等入口——此前该表建了但从未写入，
+	// 导致文件库的「从帖子存入」缺少前提。
+	Attachments []Attachment `json:"attachments"`
+}
+
+// Attachment 是帖子附件的对外投影。
+type Attachment struct {
+	FileID    uuid.UUID `json:"fileId"`
+	Name      string    `json:"name"`
+	Mime      string    `json:"mime"`
+	Kind      string    `json:"kind"`
+	SizeBytes int64     `json:"sizeBytes"`
+	PageCount int32     `json:"pageCount"`
 }
 
 // Comment 是评论 DTO。
@@ -96,6 +110,8 @@ type CreatePostInput struct {
 	GroupID    *uuid.UUID
 	Visibility string
 	Tags       []string
+	// FileIDs 是要挂到帖子上的文件（须已上传完成且属于作者本人）。
+	FileIDs []uuid.UUID
 }
 
 type FeedResult struct {
@@ -325,6 +341,9 @@ type readQuerier interface {
 type Service struct {
 	pool    *pgxpool.Pool
 	queries readQuerier
+	// attachments 查询帖子附件。与 readQuerier 分开：
+	// 现有测试替身不必为一个与主流程无关的能力补方法。
+	attachments attachmentQuerier
 	// bookmarks 列出「当前用户收藏了哪些帖子」。
 	// 单独抽成接口而不是塞进 readQuerier：收藏列表是分页写路径之外的独立查询，
 	// 且 sqlc 生成类型尚未就绪（见 poolBookmarkQuerier 的说明）。
@@ -341,6 +360,7 @@ func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{
 		pool:      pool,
 		queries:   db.New(pool),
+		attachments: db.New(pool),
 		bookmarks: poolBookmarkQuerier{pool: pool},
 		handles:   dbHandleResolver{queries: db.New(pool)},
 	}
@@ -358,6 +378,8 @@ func (s *Service) SetNotifier(notifier Notifier) { s.notifier = notifier }
 func (s *Service) SetHandleResolver(resolver HandleResolver) { s.handles = resolver }
 
 // newServiceWithQuerier 用于测试注入替身；写路径仍需 pool，故只覆盖读路径。
+// newServiceWithQuerier 用于测试注入替身。
+// attachments 留空：测试替身场景下不查附件，attachFiles 会在 nil 时跳过。
 func newServiceWithQuerier(queries readQuerier) *Service { return &Service{queries: queries} }
 
 func uuidParam(id uuid.UUID) pgtype.UUID { return pgtype.UUID{Bytes: id, Valid: id != uuid.Nil} }
@@ -464,6 +486,17 @@ func (s *Service) CreatePost(ctx context.Context, authorID uuid.UUID, input Crea
 	if err != nil {
 		return Post{}, err
 	}
+	// 附件：只挂作者本人且已就绪的文件。LinkPostAttachment 的 SQL 里
+	// 已经用 EXISTS 做了这层校验，不属于作者或未就绪的文件会被静默跳过，
+	// 而不是让整个发帖失败——用户多选了一张还没传完的图不该丢掉整条帖子。
+	for i, fileID := range input.FileIDs {
+		if err := q.LinkPostAttachment(ctx, db.LinkPostAttachmentParams{
+			PostID: created.ID, FileID: uuidParam(fileID), Position: int16(i), OwnerID: uuidParam(authorID),
+		}); err != nil {
+			return Post{}, err
+		}
+	}
+
 	for _, tag := range tags {
 		record, err := q.UpsertTag(ctx, db.UpsertTagParams{Name: tag.name, Slug: tag.slug})
 		if err != nil {
@@ -552,7 +585,18 @@ func (s *Service) GetPost(ctx context.Context, userID, postID uuid.UUID) (Post, 
 	if err != nil {
 		return Post{}, err
 	}
-	return toPost(row)
+	post, err := toPost(row)
+	if err != nil {
+		return Post{}, err
+	}
+	// 附件加载失败不应让帖子详情整个失败：正文才是主体。
+	batch := []Post{post}
+	if err := s.attachFiles(ctx, s.attachments, batch); err != nil {
+		slog.Error("加载帖子附件失败", "postId", postID, "err", err)
+		post.Attachments = []Attachment{}
+		return post, nil
+	}
+	return batch[0], nil
 }
 
 // Feed 返回一页信息流，多取一条用于判断是否有下一页。
@@ -625,6 +669,9 @@ func (s *Service) Feed(ctx context.Context, userID uuid.UUID, stream, rawCursor 
 			return FeedResult{}, err
 		}
 		posts = append(posts, post)
+	}
+	if err := s.attachFiles(ctx, s.attachments, posts); err != nil {
+		slog.Error("加载信息流附件失败", "stream", stream, "err", err)
 	}
 	var next *string
 	if hasMore && len(rows) > 0 {
@@ -786,6 +833,9 @@ func (s *Service) Bookmarks(ctx context.Context, userID uuid.UUID, rawCursor str
 			return FeedResult{}, err
 		}
 		posts = append(posts, post)
+	}
+	if err := s.attachFiles(ctx, s.attachments, posts); err != nil {
+		slog.Error("加载收藏附件失败", "err", err)
 	}
 	var next *string
 	if hasMore && len(rows) > 0 {
@@ -1062,6 +1112,61 @@ func toPost(row db.GetPostByIDRow) (Post, error) {
 		post.RepostOf = &RepostSummary{ID: row.RepostID.Bytes, AuthorName: stringValue(row.RepostAuthorName), ContentText: stringValue(row.RepostContentText), Paper: repostPaper}
 	}
 	return post, nil
+}
+
+// attachmentQuerier 是附件查询的最小依赖。
+// 单独声明而不是直接用 *db.Queries，是为了让单元测试能注入替身。
+type attachmentQuerier interface {
+	ListAttachmentsForPosts(context.Context, []pgtype.UUID) ([]db.ListAttachmentsForPostsRow, error)
+}
+
+// attachFiles 为一批帖子补上附件。
+//
+// 一条 IN 查询覆盖整页：每张卡片单独查一次会变成 N+1，
+// 而信息流一页 20 条，代价不可忽略。
+func (s *Service) attachFiles(ctx context.Context, q attachmentQuerier, posts []Post) error {
+	if len(posts) == 0 {
+		return nil
+	}
+	// 测试替身场景没有附件查询能力：直接按「无附件」处理。
+	if q == nil {
+		for i := range posts {
+			posts[i].Attachments = []Attachment{}
+		}
+		return nil
+	}
+	ids := make([]pgtype.UUID, 0, len(posts))
+	for _, post := range posts {
+		ids = append(ids, uuidParam(post.ID))
+	}
+	rows, err := q.ListAttachmentsForPosts(ctx, ids)
+	if err != nil {
+		return err
+	}
+	byPost := make(map[uuid.UUID][]Attachment, len(posts))
+	for _, row := range rows {
+		postID := uuid.UUID(row.PostID.Bytes)
+		pageCount := int32(0)
+		if row.PageCount != nil {
+			pageCount = *row.PageCount
+		}
+		byPost[postID] = append(byPost[postID], Attachment{
+			FileID:    uuid.UUID(row.ID.Bytes),
+			Name:      row.OriginalName,
+			Mime:      row.Mime,
+			Kind:      row.Kind,
+			SizeBytes: row.SizeBytes,
+			PageCount: pageCount,
+		})
+	}
+	for i := range posts {
+		if files, ok := byPost[posts[i].ID]; ok {
+			posts[i].Attachments = files
+		} else {
+			posts[i].Attachments = []Attachment{}
+		}
+	}
+	return nil
 }
 
 func makePaper(id pgtype.UUID, doi, arxivID, openreviewID, title *string, authorsJSON []byte, abstract, venue *string, published pgtype.Date, citation *int32, source *string, created pgtype.Timestamptz) (*paper.Paper, error) {

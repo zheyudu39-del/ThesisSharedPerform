@@ -5,6 +5,9 @@ import { realpathSync } from 'node:fs'
 import { Server } from '@hocuspocus/server'
 
 import { config, validateConfig } from './config.js'
+import { verifyInternalSignature } from './internal-auth.js'
+import { forceReloadDocument } from './reload.js'
+import { snapshotNow } from './snapshot.js'
 import { logger } from './logger.js'
 import { hocuspocusHooks } from './hooks.js'
 import { closeAuth, pingDatabase } from './auth.js'
@@ -51,9 +54,87 @@ export function createServer() {
   return server
 }
 
-/** 独立的健康检查 HTTP 端口（与 WebSocket 共用 1234 会与 Hocuspocus 的请求处理冲突）。 */
-function startHealthServer(port) {
+/**
+ * 独立的内部 HTTP 端口（与 WebSocket 共用 1234 会与 Hocuspocus 的请求处理冲突）。
+ *
+ * 除了健康检查，还承载一条内部运维通道：
+ *   POST /internal/documents/{docId}/reload
+ * 由 Go API 在快照回滚后调用，把内存里的 Y.Doc 卸掉，让客户端重连时
+ * 从新快照重建。这条通道用 HMAC 签名鉴权（见 internal-auth.js），
+ * 不接受用户 JWT —— 它是服务对服务的动作，与任何用户权限无关。
+ */
+function startHealthServer(port, getServer) {
   const health = http.createServer(async (req, res) => {
+    // 内部重载：只接受 POST，且必须带有效签名。
+    const reloadMatch = /^\/internal\/documents\/([^/]+)\/reload$/.exec(req.url ?? '')
+    if (reloadMatch) {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' })
+        res.end('method not allowed')
+        return
+      }
+      const documentName = decodeURIComponent(reloadMatch[1])
+      const check = verifyInternalSignature(
+        `reload:${documentName}`,
+        req.headers['x-internal-timestamp'],
+        req.headers['x-internal-signature'],
+      )
+      if (!check.ok) {
+        logger.warn(`内部重载被拒 doc=${documentName} 原因=${check.reason}`)
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: check.reason }))
+        return
+      }
+      try {
+        const result = await forceReloadDocument(getServer(), documentName)
+        res.writeHead(result.reloaded ? 200 : 409, {
+          'Content-Type': 'application/json; charset=utf-8',
+        })
+        res.end(JSON.stringify(result))
+      } catch (err) {
+        logger.error(`内部重载失败 doc=${documentName}`, err)
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: 'reload_failed' }))
+      }
+      return
+    }
+
+    // 立即快照：REST 的「创建快照」在插入元数据行后调用这里，
+    // 由本进程把内存中的真实正文写到对应的 storage_key。
+    const snapMatch = /^\/internal\/documents\/([^/]+)\/snapshot\/(\d+)$/.exec(req.url ?? '')
+    if (snapMatch) {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' })
+        res.end('method not allowed')
+        return
+      }
+      const documentName = decodeURIComponent(snapMatch[1])
+      const version = Number.parseInt(snapMatch[2], 10)
+      const check = verifyInternalSignature(
+        `snapshot:${documentName}`,
+        req.headers['x-internal-timestamp'],
+        req.headers['x-internal-signature'],
+      )
+      if (!check.ok) {
+        logger.warn(`内部快照被拒 doc=${documentName} 原因=${check.reason}`)
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: check.reason }))
+        return
+      }
+      try {
+        const result = await snapshotNow(getServer(), documentName, version)
+        res.writeHead(result.ok ? 200 : 500, {
+          'Content-Type': 'application/json; charset=utf-8',
+        })
+        res.end(JSON.stringify(result))
+      } catch (err) {
+        logger.error(`内部快照失败 doc=${documentName} v${version}`, err)
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: 'snapshot_failed' }))
+      }
+      return
+    }
+
     if (req.method !== 'GET' || !['/healthz', '/readyz'].includes(req.url)) {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
       res.end('not found')
@@ -101,7 +182,7 @@ export async function start() {
 
   let health = null
   if (config.healthPort > 0) {
-    health = startHealthServer(config.healthPort)
+    health = startHealthServer(config.healthPort, () => server)
   }
 
   let shuttingDown = false
