@@ -132,18 +132,41 @@ make web-check   # 前端类型检查
 
 ## 当前进度
 
-**已完成（M1 地基）**
+**M1 · 地基与账号**
 
-- [x] 数据库完整 schema（29 表 / 12 枚举 / UUIDv7 / 触发器 / 索引）
+- [x] 数据库完整 schema（UUIDv7 / 触发器 / 索引 / tsvector 检索）
 - [x] 迁移可执行且可回滚（goose）
 - [x] Go API 骨架：健康检查、数据库连通探测、优雅关闭
 - [x] 前端骨架：Ink & Seal 设计 token、信息流首页、内联预览卡片
-- [x] 端到端链路验证（PG → Go → Next.js SSR）
+- [x] 账号注册 / 登录 / 登出，Argon2id + HttpOnly Cookie + CSRF 双提交
+- [x] 论文元数据解析（DOI → Crossref / arXiv 自动抓取）
+- [x] 信息流三档 API（关注流 / 全站流 / 热门流），游标分页
+- [x] 发帖、转发、点赞、收藏、评论
+- [x] 文件上传 + PDF 页图预览（SeaweedFS + pdftoppm）
+- [x] 统一检索（tsvector + trigram 回退）与通知中心
+- [x] SSR / SEO：论文详情与个人主页改为 Server Component，含 sitemap / robots
 
-**下一步（M1 功能）**
+**M2 · 群组**
 
-- [ ] 账号注册 / 登录 / JWT 会话
-- [ ] 论文元数据解析（DOI / arXiv）
-- [ ] 信息流三档 API（关注流 / 全站流 / 热门流）
-- [ ] 发帖与转发
-- [ ] 文件上传 + 内联预览真实渲染（pdf.js）
+- [x] 群组 CRUD、成员与角色（owner > admin > member）
+- [x] 邀请码、入群申请与审批、群内动态
+
+**M3 · 协同编辑**
+
+- [x] 文档 CRUD、文档级权限与成员覆盖
+- [x] Node 协同服务（Hocuspocus 4.8 + Yjs），快照落 S3
+- [x] TipTap 编辑器：实时协作、协作者光标、版本快照、批注
+
+**M4 · 策展与开放**
+
+- [x] 精选策展：策展集 CRUD、条目增删排序、上下架时间
+- [x] 文档导出：Markdown / LaTeX / DOCX（保留章节结构，中文经 ctex）
+- [x] 开放 API：API Key 管理、`/openapi/v1` 只读端点、scopes、按密钥限流
+
+**待做**
+
+- [ ] AI 辅助（摘要 / 相关论文推荐）——按当前排期暂缓
+- [ ] 机构邮箱认证、第三方登录
+- [ ] 举报与屏蔽、话题页、@ 提及
+- [ ] PDF 全文检索、群文件库
+- [ ] Redis 缓存与后台任务、埋点、邮件通知、可观测性
