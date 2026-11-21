@@ -210,14 +210,38 @@ export function notificationCount(item: NotificationDTO): number {
 /**
  * 通知的跳转地址。
  *
- * 只有帖子有可直接拼出的详情路由（/posts/{id}）。用户与群组的结果
- * 需要 handle / slug，而通知只带实体 ID，因此暂不生成链接。
+ * 各 targetType 对应的站内路由：
+ * - post      → /posts/{id}（点赞、评论、转发、提及）
+ * - comment   → /posts/{payload.postId}（回复通知：通知里的 ID 是帖子，
+ *               评论本身没有独立路由，跳到帖子详情即可看到回复）
+ * - group     → /groups/{payload.slug}（入群申请）。群组路由按 slug 而不是 ID，
+ *               因此优先用 payload 里的 slug；缺失时退回 ID 拼出的地址，
+ *               由群组页自行处理「找不到」的情况。
+ * - document  → /documents/{id}（文档被编辑）
+ *
+ * 其余类型（system 等）没有确定的落地页，返回 null，由调用方渲染为不可点击项。
  */
 export function notificationHref(item: NotificationDTO): string | null {
-  if (item.targetType === "post" && item.targetId) {
-    return `/posts/${encodeURIComponent(item.targetId)}`;
+  const targetId = item.targetId;
+
+  switch (item.targetType) {
+    case "post":
+      return targetId ? `/posts/${encodeURIComponent(targetId)}` : null;
+    case "comment": {
+      // 回复通知把帖子 ID 放在 payload.postId；targetId 只是兜底。
+      const postId = str(item.payload.postId) || targetId;
+      return postId ? `/posts/${encodeURIComponent(postId)}` : null;
+    }
+    case "group": {
+      const slug = str(item.payload.slug);
+      if (slug) return `/groups/${encodeURIComponent(slug)}`;
+      return targetId ? `/groups/${encodeURIComponent(targetId)}` : null;
+    }
+    case "document":
+      return targetId ? `/documents/${encodeURIComponent(targetId)}` : null;
+    default:
+      return null;
   }
-  return null;
 }
 
 /** 一句话描述，供列表直接渲染。 */

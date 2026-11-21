@@ -239,3 +239,27 @@ func TestNotifyCommentUsesRecipientAndType(t *testing.T) {
 		t.Fatalf("回复通知字段不正确: %+v", got)
 	}
 }
+
+func TestCanModifyPost(t *testing.T) {
+	author := uuid.New()
+	other := uuid.New()
+	tests := []struct {
+		name  string
+		actor uuid.UUID
+		role  string
+		want  bool
+	}{
+		{"作者本人可以操作", author, "user", true},
+		{"运营可以操作他人帖子", other, "admin", true},
+		{"普通用户不能操作他人帖子", other, "user", false},
+		{"空角色不能操作他人帖子", other, "", false},
+		{"运营操作自己的帖子也允许", author, "admin", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CanModifyPost(tt.actor, author, tt.role); got != tt.want {
+				t.Fatalf("CanModifyPost() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

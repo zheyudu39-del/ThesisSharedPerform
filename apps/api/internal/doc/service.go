@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -108,22 +109,92 @@ type Querier interface {
 	SetAnnotationResolved(context.Context, db.SetAnnotationResolvedParams) (pgtype.UUID, error)
 }
 
+// NotifyInput 描述一条待生成的通知，字段与 notify.CreateInput 一一对应。
+// 与 content / group 的同类声明一致：doc 只认识自己的抽象，
+// 由 server 侧的适配器桥接到 notify.Service。
+type NotifyInput struct {
+	UserID     uuid.UUID
+	Type       string
+	ActorID    uuid.UUID
+	TargetType string
+	TargetID   uuid.UUID
+	Payload    map[string]any
+}
+
+// Notifier 是通知生成的抽象，由 server 注入 notify.Service 的适配器。
+// 为 nil 时跳过通知（单元测试或未接入通知的部署），业务写入不受影响。
+type Notifier interface {
+	Notify(ctx context.Context, input NotifyInput) error
+}
+
+// editorQuerier 查询文档编辑通知的收件人：创建者 + 有编辑权限的文档级成员。
+//
+// 单独抽成接口而不是塞进 Querier：Querier 被单测替身完整实现，加方法会让
+// 既有替身编译失败；且该查询只服务于通知。
+type editorQuerier interface {
+	ListDocumentEditorIDs(ctx context.Context, docID pgtype.UUID) ([]pgtype.UUID, error)
+}
+
+// dbEditorQuerier 用生成查询取回收件人。
+// 创建者不一定在 doc_members 里（默认权限来自群角色），因此 SQL 用 UNION 并入。
+type dbEditorQuerier struct{ queries *db.Queries }
+
+func (q dbEditorQuerier) ListDocumentEditorIDs(ctx context.Context, docID pgtype.UUID) ([]pgtype.UUID, error) {
+	return q.queries.ListDocumentEditorIDs(ctx, docID)
+}
+
+// snapshotQuerier 查询单条快照记录，供回滚与下载使用。
+//
+// 单独抽成接口而不是塞进 Querier：Querier 已被单测替身完整实现，
+// 新增方法会让既有替身编译失败；而这两条查询只服务于回滚链路。
+type snapshotQuerier interface {
+	GetSnapshotByVersion(ctx context.Context, docID pgtype.UUID, version int32) (db.DocSnapshot, error)
+}
+
+// generatedSnapshotQuerier 用 sqlc 生成的 GetSnapshot 读快照行。
+type generatedSnapshotQuerier struct{ queries *db.Queries }
+
+func (q generatedSnapshotQuerier) GetSnapshotByVersion(ctx context.Context, docID pgtype.UUID, version int32) (db.DocSnapshot, error) {
+	if q.queries == nil {
+		return db.DocSnapshot{}, pgx.ErrNoRows
+	}
+	return q.queries.GetSnapshot(ctx, db.GetSnapshotParams{DocID: docID, Version: version})
+}
+
 // Service 实现文档领域逻辑。
 type Service struct {
 	pool    *pgxpool.Pool
 	queries Querier
 	now     func() time.Time
+	// notifier 可选：nil 时跳过通知生成。
+	notifier Notifier
+	// editors 可选：文档编辑通知的收件人查询。为 nil 时跳过该通知。
+	editors editorQuerier
+	// snapshots 用于回滚时读取指定版本的存储键。
+	snapshots snapshotQuerier
 }
 
 // NewService 构造服务。pool 为 nil 时只读路径可用（测试替身场景）。
 func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, queries: db.New(pool), now: time.Now}
+	return &Service{
+		pool:      pool,
+		queries:   db.New(pool),
+		now:       time.Now,
+		editors:   dbEditorQuerier{queries: db.New(pool)},
+		snapshots: generatedSnapshotQuerier{queries: db.New(pool)},
+	}
 }
+
+// SetNotifier 注入通知实现；不注入时文档编辑不产生通知。
+func (s *Service) SetNotifier(notifier Notifier) { s.notifier = notifier }
 
 // newServiceWithQuerier 用于测试注入替身。
 func newServiceWithQuerier(queries Querier) *Service {
 	return &Service{queries: queries, now: time.Now}
 }
+
+// SetSnapshotQuerier 注入快照查询实现（测试用；生产环境由 NewService 自动装配）。
+func (s *Service) SetSnapshotQuerier(q snapshotQuerier) { s.snapshots = q }
 
 // withTx 在事务中执行 fn；没有连接池（单元测试替身）时直接执行。
 func (s *Service) withTx(ctx context.Context, fn func(Querier) error) error {
@@ -223,6 +294,7 @@ func (s *Service) UpdateDocument(ctx context.Context, userID, docID uuid.UUID, i
 		params.Status = db.NullDocStatus{DocStatus: status, Valid: true}
 	}
 
+	var creatorID uuid.UUID
 	err := s.withTx(ctx, func(q Querier) error {
 		facts, err := s.loadAccess(ctx, q, userID, docID)
 		if err != nil {
@@ -236,13 +308,56 @@ func (s *Service) UpdateDocument(ctx context.Context, userID, docID uuid.UUID, i
 		} else if err != nil {
 			return fmt.Errorf("更新文档失败: %w", err)
 		}
+		creatorID = facts.CreatedBy
 		return nil
 	})
 	if err != nil {
 		return Document{}, err
 	}
+	// 只有非创建者编辑才提醒：创建者改自己的文档不必被自己打扰。
+	// 通知在提交后发送，失败只记日志。
+	if creatorID != uuid.Nil && creatorID != userID {
+		s.notifyDocEdit(ctx, creatorID, userID, docID)
+	}
 	updated, _, err := s.GetDocument(ctx, userID, docID)
 	return updated, err
+}
+
+// notifyDocEdit 给文档创建者与编辑者发「文档被编辑」通知。
+//
+// 收件人来自 ListDocumentEditorIDs（创建者 + 文档级 editor），排除编辑者本人；
+// 同一文档 5 分钟内的多次编辑由 notify 服务层聚合为一条，这里只需逐人发送。
+func (s *Service) notifyDocEdit(ctx context.Context, creatorID, actorID, docID uuid.UUID) {
+	if s.notifier == nil || s.editors == nil {
+		return
+	}
+	recipients, err := s.editors.ListDocumentEditorIDs(ctx, uuidParam(docID))
+	if err != nil {
+		slog.Error("查询文档编辑者失败", "docId", docID, "err", err)
+		return
+	}
+	seen := make(map[uuid.UUID]struct{}, len(recipients)+1)
+	// 创建者必收，即使查询因并发删除暂时取不到。
+	seen[creatorID] = struct{}{}
+	for _, id := range recipients {
+		if id.Valid {
+			seen[uuid.UUID(id.Bytes)] = struct{}{}
+		}
+	}
+	for recipient := range seen {
+		if recipient == actorID || recipient == uuid.Nil {
+			continue
+		}
+		if err := s.notifier.Notify(ctx, NotifyInput{
+			UserID:     recipient,
+			Type:       "doc_edit",
+			ActorID:    actorID,
+			TargetType: "document",
+			TargetID:   docID,
+		}); err != nil {
+			slog.Error("生成文档编辑通知失败", "docId", docID, "userId", recipient, "err", err)
+		}
+	}
 }
 
 // DeleteDocument 软删除文档，仅 owner 可调用。
@@ -512,6 +627,124 @@ func (s *Service) CreateSnapshot(ctx context.Context, userID, docID uuid.UUID, l
 		CreatedAt: created.CreatedAt.Time.UTC(),
 		SizeBytes: created.SizeBytes,
 	}, nil
+}
+
+// RestoreResult 是回滚操作的结果。
+//
+// RequiresReconnect 恒为 true：正文是 Yjs 二进制，协同服务（apps/ws）把
+// Y.Doc 放在内存里，REST 侧改数据库指针无法影响已经加载的文档。
+// 正确做法是前端断开 provider → 丢弃本地 Y.Doc → 重新连接，
+// 由协同服务按新的 latest_snapshot 重新加载。这里诚实地告诉前端这一点，
+// 而不是假装「回滚即时生效」。
+type RestoreResult struct {
+	RestoredFrom      int32 `json:"restoredFrom"`
+	NewVersion        int32 `json:"newVersion"`
+	RequiresReconnect bool  `json:"requiresReconnect"`
+}
+
+// SnapshotContent 是下载快照正文的结果（Yjs 全量状态）。
+type SnapshotContent struct {
+	Version int32
+	Key     string
+}
+
+// SnapshotForDownload 校验权限并返回指定版本的存储键，正文由 handler 从对象存储读取。
+//
+// 权限要求 editor 及以上：快照是整篇文档的完整副本，viewer 只需要阅读
+// 当前正文，不应该能批量导出历史版本。
+func (s *Service) SnapshotForDownload(ctx context.Context, userID, docID uuid.UUID, version int32) (SnapshotContent, error) {
+	if version <= 0 {
+		return SnapshotContent{}, fmt.Errorf("%w: 快照版本号必须大于 0", ErrValidation)
+	}
+	if _, err := s.requireRole(ctx, s.queries, userID, docID, CanEdit); err != nil {
+		return SnapshotContent{}, err
+	}
+	snapshot, err := s.loadSnapshot(ctx, docID, version)
+	if err != nil {
+		return SnapshotContent{}, err
+	}
+	return SnapshotContent{Version: snapshot.Version, Key: snapshot.StorageKey}, nil
+}
+
+// RestoreSnapshot 把文档回滚到指定快照版本（PRD D-04「版本历史与回滚」）。
+//
+// 实现方式：不覆盖旧快照、也不复制二进制，而是新增一条快照记录，
+// storage_key 指向被回滚版本的对象。这样做的好处：
+//   - 对象存储只增不减，回滚本身不会失败在半途（没有跨系统复制）；
+//   - 版本号仍然单调递增，「回滚到 v3」产生的 v7 可以再次被回滚或下载；
+//   - 审计上能看出某次回滚发生在什么时候、由谁发起。
+//
+// 代价是同一个 storage_key 会出现在多条记录里：清理旧快照时必须先确认
+// 没有其他记录引用它（见 db/queries/documents.sql 的说明）。
+func (s *Service) RestoreSnapshot(ctx context.Context, userID, docID uuid.UUID, version int32) (RestoreResult, error) {
+	if version <= 0 {
+		return RestoreResult{}, fmt.Errorf("%w: 快照版本号必须大于 0", ErrValidation)
+	}
+	// 先判权限再查版本：否则无权用户能通过 ErrNotFound / ErrForbidden 的
+	// 差异探测「某个版本是否存在」。
+	if _, err := s.requireRole(ctx, s.queries, userID, docID, CanEdit); err != nil {
+		return RestoreResult{}, err
+	}
+
+	target, err := s.loadSnapshot(ctx, docID, version)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+
+	var created db.DocSnapshot
+	err = s.withTx(ctx, func(q Querier) error {
+		facts, err := s.loadAccess(ctx, q, userID, docID)
+		if err != nil {
+			return err
+		}
+		if !CanEdit(EffectiveRole(facts)) {
+			return ErrForbidden
+		}
+		newVersion, err := q.BumpDocumentSnapshot(ctx, uuidParam(docID))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("递增快照版本失败: %w", err)
+		}
+		label := fmt.Sprintf("回滚到 v%d", version)
+		created, err = q.InsertSnapshot(ctx, db.InsertSnapshotParams{
+			DocID:      uuidParam(docID),
+			Version:    newVersion,
+			StorageKey: target.StorageKey,
+			SizeBytes:  target.SizeBytes,
+			Label:      &label,
+			CreatedBy:  uuidParam(userID),
+		})
+		if err != nil {
+			return fmt.Errorf("记录回滚快照失败: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return RestoreResult{}, err
+	}
+
+	return RestoreResult{
+		RestoredFrom:      version,
+		NewVersion:        created.Version,
+		RequiresReconnect: true,
+	}, nil
+}
+
+// loadSnapshot 读取指定版本的快照记录；不存在时返回 ErrNotFound。
+func (s *Service) loadSnapshot(ctx context.Context, docID uuid.UUID, version int32) (db.DocSnapshot, error) {
+	if s.snapshots == nil {
+		return db.DocSnapshot{}, fmt.Errorf("快照存储未配置")
+	}
+	snapshot, err := s.snapshots.GetSnapshotByVersion(ctx, uuidParam(docID), version)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.DocSnapshot{}, ErrNotFound
+	}
+	if err != nil {
+		return db.DocSnapshot{}, fmt.Errorf("查询快照失败: %w", err)
+	}
+	return snapshot, nil
 }
 
 // snapshotStorageKey 返回架构文档 §5.1 约定的快照对象键。

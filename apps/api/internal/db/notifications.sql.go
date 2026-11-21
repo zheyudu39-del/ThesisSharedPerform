@@ -88,6 +88,52 @@ func (q *Queries) GetNotificationPrefs(ctx context.Context, userID pgtype.UUID) 
 	return i, err
 }
 
+const getUnreadDocEditNotification = `-- name: GetUnreadDocEditNotification :one
+SELECT id, user_id, type, actor_id, target_type, target_id, payload, read_at, created_at FROM notifications
+WHERE user_id = $1
+  AND type = 'doc_edit'
+  AND target_type = $2
+  AND target_id = $3
+  AND read_at IS NULL
+  AND created_at >= $4
+ORDER BY created_at DESC
+LIMIT 1
+FOR UPDATE
+`
+
+type GetUnreadDocEditNotificationParams struct {
+	UserID     pgtype.UUID        `json:"user_id"`
+	TargetType *string            `json:"target_type"`
+	TargetID   pgtype.UUID        `json:"target_id"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
+// 文档编辑聚合：同一文档在 5 分钟窗口内的多次编辑合并为一条通知。
+// 与点赞聚合的区别是窗口更短——文档连续保存很常见，10 分钟会把整场协作压成一条，
+// 反而让人以为只改了一次。FOR UPDATE 同样用于串行化并发的合并。
+// $4 为窗口起点（now - 5 分钟），由服务层计算，便于单元测试控制时间。
+func (q *Queries) GetUnreadDocEditNotification(ctx context.Context, arg GetUnreadDocEditNotificationParams) (Notification, error) {
+	row := q.db.QueryRow(ctx, getUnreadDocEditNotification,
+		arg.UserID,
+		arg.TargetType,
+		arg.TargetID,
+		arg.CreatedAt,
+	)
+	var i Notification
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Type,
+		&i.ActorID,
+		&i.TargetType,
+		&i.TargetID,
+		&i.Payload,
+		&i.ReadAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getUnreadLikeAggNotification = `-- name: GetUnreadLikeAggNotification :one
 SELECT id, user_id, type, actor_id, target_type, target_id, payload, read_at, created_at FROM notifications
 WHERE user_id = $1
@@ -131,6 +177,63 @@ func (q *Queries) GetUnreadLikeAggNotification(ctx context.Context, arg GetUnrea
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const listDocumentEditorIDs = `-- name: ListDocumentEditorIDs :many
+SELECT created_by AS user_id FROM documents
+WHERE id = $1 AND deleted_at IS NULL
+UNION
+SELECT user_id FROM doc_members
+WHERE doc_id = $1 AND role IN ('owner', 'editor')
+`
+
+// 文档编辑通知的收件人：文档创建者 + 拥有编辑权限的文档级成员。
+// 创建者不一定在 doc_members 里（默认权限来自群角色），所以用 UNION 去重合并。
+func (q *Queries) ListDocumentEditorIDs(ctx context.Context, docID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listDocumentEditorIDs, docID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var user_id pgtype.UUID
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGroupManagerIDs = `-- name: ListGroupManagerIDs :many
+SELECT user_id FROM group_members
+WHERE group_id = $1 AND role IN ('owner', 'admin')
+`
+
+// 入群申请的收件人：群主与所有管理员。
+// 群主在 group_members 里也有一行 role='owner'，因此无需单独 UNION groups.owner_id。
+func (q *Queries) ListGroupManagerIDs(ctx context.Context, groupID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listGroupManagerIDs, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var user_id pgtype.UUID
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listNotifications = `-- name: ListNotifications :many
@@ -209,6 +312,47 @@ func (q *Queries) ListNotifications(ctx context.Context, arg ListNotificationsPa
 	return items, nil
 }
 
+const listUsersByHandles = `-- name: ListUsersByHandles :many
+
+SELECT id, handle FROM users
+WHERE handle::text = ANY($1::text[])
+  AND deleted_at IS NULL
+  AND status = 'active'
+`
+
+type ListUsersByHandlesRow struct {
+	ID     pgtype.UUID `json:"id"`
+	Handle string      `json:"handle"`
+}
+
+// ---------------------------------------------------------------------------
+// 通知收件人解析
+// ---------------------------------------------------------------------------
+// 下面几条查询不属于通知表本身，但只服务于通知的收件人计算，
+// 放在这里便于一处看清「谁会收到什么通知」。
+// 把正文里提取出的 @handle 一次性解析成用户 ID，避免逐条查询造成 N+1。
+// 只返回 active 且未删除的用户：给注销/封禁账号发通知没有意义。
+// handle 在 users 上是 varchar，这里显式转 text 以便与 text[] 比较。
+func (q *Queries) ListUsersByHandles(ctx context.Context, handles []string) ([]ListUsersByHandlesRow, error) {
+	rows, err := q.db.Query(ctx, listUsersByHandles, handles)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersByHandlesRow
+	for rows.Next() {
+		var i ListUsersByHandlesRow
+		if err := rows.Scan(&i.ID, &i.Handle); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markAllRead = `-- name: MarkAllRead :execrows
 UPDATE notifications SET read_at = now()
 WHERE user_id = $1 AND read_at IS NULL
@@ -241,6 +385,43 @@ func (q *Queries) MarkRead(ctx context.Context, arg MarkReadParams) (int64, erro
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const updateDocEditNotification = `-- name: UpdateDocEditNotification :one
+UPDATE notifications
+SET payload = $2, actor_id = $3, created_at = now()
+WHERE id = $1 AND user_id = $4
+RETURNING id, user_id, type, actor_id, target_type, target_id, payload, read_at, created_at
+`
+
+type UpdateDocEditNotificationParams struct {
+	ID      pgtype.UUID `json:"id"`
+	Payload []byte      `json:"payload"`
+	ActorID pgtype.UUID `json:"actor_id"`
+	UserID  pgtype.UUID `json:"user_id"`
+}
+
+// 合并后刷新 payload 与 created_at，让「刚有人编辑」的通知上浮到列表顶部。
+func (q *Queries) UpdateDocEditNotification(ctx context.Context, arg UpdateDocEditNotificationParams) (Notification, error) {
+	row := q.db.QueryRow(ctx, updateDocEditNotification,
+		arg.ID,
+		arg.Payload,
+		arg.ActorID,
+		arg.UserID,
+	)
+	var i Notification
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Type,
+		&i.ActorID,
+		&i.TargetType,
+		&i.TargetID,
+		&i.Payload,
+		&i.ReadAt,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const updateLikeAggNotification = `-- name: UpdateLikeAggNotification :one

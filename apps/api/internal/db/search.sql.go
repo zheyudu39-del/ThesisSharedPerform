@@ -185,6 +185,133 @@ func (q *Queries) SearchByTypes(ctx context.Context, arg SearchByTypesParams) ([
 	return items, nil
 }
 
+const searchFiltered = `-- name: SearchFiltered :many
+WITH q AS (
+    SELECT
+        $8::text AS raw,
+        websearch_to_tsquery('simple', $8::text) AS tsq
+)
+SELECT
+    sd.entity_type,
+    sd.entity_id,
+    COALESCE(sd.title, '')::text AS title,
+    COALESCE(sd.body, '')::text  AS body,
+    ts_rank(sd.tsv, q.tsq)::real AS rank,
+    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity
+FROM search_documents sd
+CROSS JOIN q
+LEFT JOIN posts p  ON sd.entity_type = 'post'  AND p.id = sd.entity_id AND p.deleted_at IS NULL
+LEFT JOIN papers pa ON sd.entity_type = 'paper' AND pa.id = sd.entity_id
+WHERE (
+        sd.tsv @@ q.tsq
+     OR sd.title ILIKE $1::text
+     OR sd.body ILIKE $1::text
+     OR similarity(sd.title, q.raw) >= 0.2
+)
+AND (
+    $2::text[] IS NULL
+    OR sd.entity_type = ANY($2::text[])
+)
+AND (
+    ($3::timestamptz IS NULL AND $4::timestamptz IS NULL)
+    OR (sd.entity_type = 'post' AND p.id IS NOT NULL
+        AND ($3::timestamptz IS NULL OR p.created_at >= $3::timestamptz)
+        AND ($4::timestamptz IS NULL OR p.created_at <= $4::timestamptz))
+    OR (sd.entity_type = 'paper' AND pa.id IS NOT NULL
+        AND ($3::timestamptz IS NULL OR pa.created_at >= $3::timestamptz)
+        AND ($4::timestamptz IS NULL OR pa.created_at <= $4::timestamptz))
+    OR (sd.entity_type NOT IN ('post', 'paper')
+        AND sd.updated_at >= COALESCE($3::timestamptz, sd.updated_at)
+        AND sd.updated_at <= COALESCE($4::timestamptz, sd.updated_at))
+)
+AND (
+    $5::text IS NULL
+    OR (sd.entity_type = 'post' AND p.id IS NOT NULL AND EXISTS(
+          SELECT 1 FROM post_tags pt JOIN tags t ON t.id = pt.tag_id
+          WHERE pt.post_id = p.id AND t.slug = $5::text))
+    OR (sd.entity_type = 'paper' AND pa.id IS NOT NULL AND EXISTS(
+          SELECT 1 FROM paper_tags pt JOIN tags t ON t.id = pt.tag_id
+          WHERE pt.paper_id = pa.id AND t.slug = $5::text))
+)
+AND (
+    $6::text IS NULL
+    OR (sd.entity_type = 'post' AND p.id IS NOT NULL AND EXISTS(
+          SELECT 1 FROM users u WHERE u.id = p.author_id AND lower(u.handle) = $6::text))
+)
+ORDER BY rank DESC, title_similarity DESC, sd.updated_at DESC
+LIMIT $7::int
+`
+
+type SearchFilteredParams struct {
+	LikePattern string             `json:"like_pattern"`
+	Types       []string           `json:"types"`
+	FromTime    pgtype.Timestamptz `json:"from_time"`
+	ToTime      pgtype.Timestamptz `json:"to_time"`
+	Tag         *string            `json:"tag"`
+	Author      *string            `json:"author"`
+	Limit       int32              `json:"limit"`
+	Query       string             `json:"query"`
+}
+
+type SearchFilteredRow struct {
+	EntityType      string      `json:"entity_type"`
+	EntityID        pgtype.UUID `json:"entity_id"`
+	Title           string      `json:"title"`
+	Body            string      `json:"body"`
+	Rank            float32     `json:"rank"`
+	TitleSimilarity float32     `json:"title_similarity"`
+}
+
+// 带筛选条件的检索（S-03）：时间范围 / 标签 / 作者。
+//
+// 这些条件依赖实体自身的列，search_documents 没有，因此按 entity_type
+// 分别 LEFT JOIN 回源表：
+//   - post  → posts（created_at、author_id；标签经 post_tags）
+//   - paper → papers（created_at；标签经 paper_tags；论文没有作者 handle）
+//   - user / group → 没有标签与作者列，带 tag / author 时被排除。
+//
+// 用 LEFT JOIN 而不是 INNER JOIN：一个筛选条件只对某类实体有意义，
+// INNER JOIN 会连带删掉不满足该条件的其它整类实体，而不是「按规则排除」。
+// 时间范围对 post / paper 用各自的 created_at；其它实体没有 created_at，
+// 退回索引的 updated_at（与 SearchAll 的时间兜底一致）。
+//
+// types 传 NULL 表示不限类型；tag / author 传 NULL 表示不过滤。
+func (q *Queries) SearchFiltered(ctx context.Context, arg SearchFilteredParams) ([]SearchFilteredRow, error) {
+	rows, err := q.db.Query(ctx, searchFiltered,
+		arg.LikePattern,
+		arg.Types,
+		arg.FromTime,
+		arg.ToTime,
+		arg.Tag,
+		arg.Author,
+		arg.Limit,
+		arg.Query,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchFilteredRow
+	for rows.Next() {
+		var i SearchFilteredRow
+		if err := rows.Scan(
+			&i.EntityType,
+			&i.EntityID,
+			&i.Title,
+			&i.Body,
+			&i.Rank,
+			&i.TitleSimilarity,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const upsertSearchDocument = `-- name: UpsertSearchDocument :exec
 
 INSERT INTO search_documents (entity_type, entity_id, title, body, tsv)

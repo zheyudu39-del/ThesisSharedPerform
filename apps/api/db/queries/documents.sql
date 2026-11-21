@@ -137,6 +137,12 @@ WHERE s.doc_id = sqlc.arg('doc_id')
 ORDER BY s.version DESC
 LIMIT sqlc.arg('limit');
 
+-- name: GetSnapshot :one
+-- 读取单个版本的快照记录，供「下载快照」与「回滚到该版本」使用。
+-- 回滚不会复制二进制：新记录直接引用旧记录的 storage_key（见 doc.RestoreSnapshot）。
+-- 因此清理历史快照前必须确认没有其他记录仍在引用同一个 storage_key。
+SELECT * FROM doc_snapshots WHERE doc_id = $1 AND version = $2;
+
 -- ---------------------------------------------------------------------------
 -- 批注（annotations）
 -- ---------------------------------------------------------------------------

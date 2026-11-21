@@ -80,3 +80,56 @@ UPDATE notifications
 SET payload = $2, actor_id = $3, created_at = now()
 WHERE id = $1 AND user_id = $4
 RETURNING *;
+
+-- name: GetUnreadDocEditNotification :one
+-- 文档编辑聚合：同一文档在 5 分钟窗口内的多次编辑合并为一条通知。
+-- 与点赞聚合的区别是窗口更短——文档连续保存很常见，10 分钟会把整场协作压成一条，
+-- 反而让人以为只改了一次。FOR UPDATE 同样用于串行化并发的合并。
+-- $4 为窗口起点（now - 5 分钟），由服务层计算，便于单元测试控制时间。
+SELECT * FROM notifications
+WHERE user_id = $1
+  AND type = 'doc_edit'
+  AND target_type = $2
+  AND target_id = $3
+  AND read_at IS NULL
+  AND created_at >= $4
+ORDER BY created_at DESC
+LIMIT 1
+FOR UPDATE;
+
+-- name: UpdateDocEditNotification :one
+-- 合并后刷新 payload 与 created_at，让「刚有人编辑」的通知上浮到列表顶部。
+UPDATE notifications
+SET payload = $2, actor_id = $3, created_at = now()
+WHERE id = $1 AND user_id = $4
+RETURNING *;
+
+-- ---------------------------------------------------------------------------
+-- 通知收件人解析
+-- ---------------------------------------------------------------------------
+-- 下面几条查询不属于通知表本身，但只服务于通知的收件人计算，
+-- 放在这里便于一处看清「谁会收到什么通知」。
+
+-- name: ListUsersByHandles :many
+-- 把正文里提取出的 @handle 一次性解析成用户 ID，避免逐条查询造成 N+1。
+-- 只返回 active 且未删除的用户：给注销/封禁账号发通知没有意义。
+-- handle 在 users 上是 varchar，这里显式转 text 以便与 text[] 比较。
+SELECT id, handle FROM users
+WHERE handle::text = ANY(sqlc.arg('handles')::text[])
+  AND deleted_at IS NULL
+  AND status = 'active';
+
+-- name: ListGroupManagerIDs :many
+-- 入群申请的收件人：群主与所有管理员。
+-- 群主在 group_members 里也有一行 role='owner'，因此无需单独 UNION groups.owner_id。
+SELECT user_id FROM group_members
+WHERE group_id = sqlc.arg('group_id') AND role IN ('owner', 'admin');
+
+-- name: ListDocumentEditorIDs :many
+-- 文档编辑通知的收件人：文档创建者 + 拥有编辑权限的文档级成员。
+-- 创建者不一定在 doc_members 里（默认权限来自群角色），所以用 UNION 去重合并。
+SELECT created_by AS user_id FROM documents
+WHERE id = sqlc.arg('doc_id') AND deleted_at IS NULL
+UNION
+SELECT user_id FROM doc_members
+WHERE doc_id = sqlc.arg('doc_id') AND role IN ('owner', 'editor');

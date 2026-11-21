@@ -111,6 +111,28 @@ func (h *ContentHandler) setBookmark(w http.ResponseWriter, r *http.Request, boo
 	writeJSON(w, http.StatusOK, map[string]bool{"bookmarked": bookmarked})
 }
 
+// Bookmarks 处理 GET /api/v1/bookmarks?cursor=&limit=。
+//
+// 收藏是个人数据，必须登录；游标编码收藏时间，按收藏时间倒序返回，
+// 响应形状与 /feed 一致（posts + nextCursor），前端可直接复用 PostCard。
+func (h *ContentHandler) Bookmarks(w http.ResponseWriter, r *http.Request) {
+	userID, ok := appmiddleware.UserID(r.Context())
+	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+		return
+	}
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.Bookmarks(r.Context(), userID, r.URL.Query().Get("cursor"), limit)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (h *ContentHandler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	userID, postID, ok := h.userAndPost(w, r)
 	if !ok {
@@ -242,10 +264,75 @@ func writeContentError(w http.ResponseWriter, err error) {
 		status, code, message = http.StatusNotFound, "repost_not_found", "原帖不存在或无权访问"
 	case errors.Is(err, content.ErrGroupNotMember):
 		status, code, message = http.StatusForbidden, "group_forbidden", "不是该群组成员"
+	case errors.Is(err, content.ErrForbidden):
+		status, code, message = http.StatusForbidden, "forbidden", "只有作者或运营可以操作这条帖子"
 	case errors.Is(err, content.ErrPostNotFound), errors.Is(err, content.ErrParentNotFound):
 		status, code, message = http.StatusNotFound, "post_not_found", err.Error()
 	default:
 		slog.Error("内容操作失败", "err", err)
 	}
 	WriteError(w, status, code, message)
+}
+
+// ---------------------------------------------------------------------------
+// 帖子编辑与删除
+// ---------------------------------------------------------------------------
+
+// updatePostRequest 是 PATCH /api/v1/posts/{id} 的请求体。
+//
+// 三个正文字段都接受，按 content → contentHtml → contentText 的优先级取第一个
+// 非 nil 的作为编辑后的正文。无论走哪个字段，服务层都会重新跑
+// SanitizeContent（Markdown → bluemonday），因此即便客户端回传 contentHtml
+// 也无法注入未清洗的标签。
+// 用指针区分「没传」与「传了空字符串」：后者是合法的「清空正文」请求。
+type updatePostRequest struct {
+	Content     *string `json:"content"`
+	ContentHTML *string `json:"contentHtml"`
+	ContentText *string `json:"contentText"`
+	Visibility  *string `json:"visibility"`
+}
+
+// UpdatePost 处理 PATCH /api/v1/posts/{id}。
+//
+// 仅作者本人或运营可改；可改字段为正文与可见性。
+// 权限语义：不存在 404，非作者非运营 403（帖子是公开的，隐藏存在性没有意义）。
+func (h *ContentHandler) UpdatePost(w http.ResponseWriter, r *http.Request) {
+	userID, postID, ok := h.userAndPost(w, r)
+	if !ok {
+		return
+	}
+	var req updatePostRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	input := content.UpdatePostInput{Visibility: req.Visibility}
+	switch {
+	case req.Content != nil:
+		input.Content = req.Content
+	case req.ContentHTML != nil:
+		input.Content = req.ContentHTML
+	case req.ContentText != nil:
+		input.Content = req.ContentText
+	}
+	post, err := h.service.UpdatePost(r.Context(), userID, postID, input)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"post": post})
+}
+
+// DeletePost 处理 DELETE /api/v1/posts/{id}。
+//
+// 软删除，成功返回 204（无响应体）。仅作者本人或运营可删。
+func (h *ContentHandler) DeletePost(w http.ResponseWriter, r *http.Request) {
+	userID, postID, ok := h.userAndPost(w, r)
+	if !ok {
+		return
+	}
+	if err := h.service.DeletePost(r.Context(), userID, postID); err != nil {
+		writeContentError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

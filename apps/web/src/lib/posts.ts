@@ -287,6 +287,24 @@ export async function getFeed(
 }
 
 /**
+ * 拉取当前用户收藏的帖子（F-05）。
+ *
+ * 与 {@link getFeed} 的区别只在排序键：服务端按「收藏时间」倒序，而不是帖子发布时间，
+ * 因此刚收藏的旧帖也会排在前面。响应形状与 feed 一致，页面可直接复用 PostCard。
+ * 收藏是个人数据，必须登录；游标同样是不透明字符串，原样回传。
+ */
+export async function getBookmarks(
+  cursor: string | null = null,
+  limit = 20,
+): Promise<FeedPage> {
+  const params = new URLSearchParams({ limit: String(Math.min(Math.max(limit, 1), 50)) });
+  if (cursor) params.set("cursor", cursor);
+
+  const body = await apiFetch(`/bookmarks?${params.toString()}`, { method: "GET" });
+  return normalizePostList(body);
+}
+
+/**
  * 单个帖子详情。
  *
  * 令牌可选：未登录也能尝试读取公开帖；服务端对「不存在」与「无权查看」
@@ -346,6 +364,45 @@ export async function createPost(input: CreatePostInput): Promise<PostDTO> {
   const body = await apiFetch("/posts", { method: "POST", body: JSON.stringify(payload) });
   if (!isRecord(body) || !("post" in body)) throw invalidResponse();
   return normalizePost(body.post);
+}
+
+/* -------------------------------------------------------------------------- */
+/* 编辑 / 删除                                                                 */
+/* -------------------------------------------------------------------------- */
+
+export type UpdatePostInput = {
+  /** 编辑后的正文（Markdown）。传空字符串表示清空——仅转发帖允许。 */
+  content?: string;
+  visibility?: PostVisibility;
+};
+
+/**
+ * 编辑帖子。仅作者本人或运营可调用，否则后端返回 403。
+ *
+ * 可改字段只有正文与可见性：type / paperId / repostOf / groupId 不可改，
+ * 改它们等于换了一条内容，应删旧发新。后端会重新清洗正文并刷新检索索引。
+ */
+export async function updatePost(id: string, input: UpdatePostInput): Promise<PostDTO> {
+  const payload: Record<string, unknown> = {};
+  if (input.content !== undefined) payload.content = input.content;
+  if (input.visibility !== undefined) payload.visibility = input.visibility;
+
+  const body = await apiFetch(`/posts/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+  if (!isRecord(body) || !("post" in body)) throw invalidResponse();
+  return normalizePost(body.post);
+}
+
+/**
+ * 软删除帖子。仅作者本人或运营可调用。
+ *
+ * 后端成功时返回 204 无响应体，因此这里不解析 JSON；失败仍按统一错误体抛 ApiError。
+ * 删除转发不影响原帖。
+ */
+export async function deletePost(id: string): Promise<void> {
+  await apiFetch(`/posts/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 /* -------------------------------------------------------------------------- */

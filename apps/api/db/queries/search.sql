@@ -96,3 +96,73 @@ WHERE (
 AND sd.entity_type = ANY(sqlc.arg('types')::text[])
 ORDER BY rank DESC, title_similarity DESC, sd.updated_at DESC
 LIMIT sqlc.arg('limit')::int;
+
+-- name: SearchFiltered :many
+-- 带筛选条件的检索（S-03）：时间范围 / 标签 / 作者。
+--
+-- 这些条件依赖实体自身的列，search_documents 没有，因此按 entity_type
+-- 分别 LEFT JOIN 回源表：
+--   * post  → posts（created_at、author_id；标签经 post_tags）
+--   * paper → papers（created_at；标签经 paper_tags；论文没有作者 handle）
+--   * user / group → 没有标签与作者列，带 tag / author 时被排除。
+--
+-- 用 LEFT JOIN 而不是 INNER JOIN：一个筛选条件只对某类实体有意义，
+-- INNER JOIN 会连带删掉不满足该条件的其它整类实体，而不是「按规则排除」。
+-- 时间范围对 post / paper 用各自的 created_at；其它实体没有 created_at，
+-- 退回索引的 updated_at（与 SearchAll 的时间兜底一致）。
+--
+-- types 传 NULL 表示不限类型；tag / author 传 NULL 表示不过滤。
+WITH q AS (
+    SELECT
+        sqlc.arg('query')::text AS raw,
+        websearch_to_tsquery('simple', sqlc.arg('query')::text) AS tsq
+)
+SELECT
+    sd.entity_type,
+    sd.entity_id,
+    COALESCE(sd.title, '')::text AS title,
+    COALESCE(sd.body, '')::text  AS body,
+    ts_rank(sd.tsv, q.tsq)::real AS rank,
+    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity
+FROM search_documents sd
+CROSS JOIN q
+LEFT JOIN posts p  ON sd.entity_type = 'post'  AND p.id = sd.entity_id AND p.deleted_at IS NULL
+LEFT JOIN papers pa ON sd.entity_type = 'paper' AND pa.id = sd.entity_id
+WHERE (
+        sd.tsv @@ q.tsq
+     OR sd.title ILIKE sqlc.arg('like_pattern')::text
+     OR sd.body ILIKE sqlc.arg('like_pattern')::text
+     OR similarity(sd.title, q.raw) >= 0.2
+)
+AND (
+    sqlc.narg('types')::text[] IS NULL
+    OR sd.entity_type = ANY(sqlc.narg('types')::text[])
+)
+AND (
+    (sqlc.narg('from_time')::timestamptz IS NULL AND sqlc.narg('to_time')::timestamptz IS NULL)
+    OR (sd.entity_type = 'post' AND p.id IS NOT NULL
+        AND (sqlc.narg('from_time')::timestamptz IS NULL OR p.created_at >= sqlc.narg('from_time')::timestamptz)
+        AND (sqlc.narg('to_time')::timestamptz IS NULL OR p.created_at <= sqlc.narg('to_time')::timestamptz))
+    OR (sd.entity_type = 'paper' AND pa.id IS NOT NULL
+        AND (sqlc.narg('from_time')::timestamptz IS NULL OR pa.created_at >= sqlc.narg('from_time')::timestamptz)
+        AND (sqlc.narg('to_time')::timestamptz IS NULL OR pa.created_at <= sqlc.narg('to_time')::timestamptz))
+    OR (sd.entity_type NOT IN ('post', 'paper')
+        AND sd.updated_at >= COALESCE(sqlc.narg('from_time')::timestamptz, sd.updated_at)
+        AND sd.updated_at <= COALESCE(sqlc.narg('to_time')::timestamptz, sd.updated_at))
+)
+AND (
+    sqlc.narg('tag')::text IS NULL
+    OR (sd.entity_type = 'post' AND p.id IS NOT NULL AND EXISTS(
+          SELECT 1 FROM post_tags pt JOIN tags t ON t.id = pt.tag_id
+          WHERE pt.post_id = p.id AND t.slug = sqlc.narg('tag')::text))
+    OR (sd.entity_type = 'paper' AND pa.id IS NOT NULL AND EXISTS(
+          SELECT 1 FROM paper_tags pt JOIN tags t ON t.id = pt.tag_id
+          WHERE pt.paper_id = pa.id AND t.slug = sqlc.narg('tag')::text))
+)
+AND (
+    sqlc.narg('author')::text IS NULL
+    OR (sd.entity_type = 'post' AND p.id IS NOT NULL AND EXISTS(
+          SELECT 1 FROM users u WHERE u.id = p.author_id AND lower(u.handle) = sqlc.narg('author')::text))
+)
+ORDER BY rank DESC, title_similarity DESC, sd.updated_at DESC
+LIMIT sqlc.arg('limit')::int;

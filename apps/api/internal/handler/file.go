@@ -20,6 +20,15 @@ func NewFileHandler(service *file.Service) *FileHandler {
 	return &FileHandler{service: service}
 }
 
+// NewFileHandlerWithIndexer 构造带文本层索引的处理器（PRD S-04）。
+//
+// 文本层提取在 file 服务里完成，但索引实现属于 search 包；
+// 由 server 在组装时注入，避免 file 包反向依赖 search 的具体实现。
+func NewFileHandlerWithIndexer(service *file.Service, indexer file.TextIndexer) *FileHandler {
+	service.SetTextIndexer(indexer)
+	return &FileHandler{service: service}
+}
+
 // Presign 处理 POST /api/v1/files/presign。
 func (h *FileHandler) Presign(w http.ResponseWriter, r *http.Request) {
 	userID, ok := appmiddleware.UserID(r.Context())

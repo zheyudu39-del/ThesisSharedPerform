@@ -67,3 +67,18 @@ LIMIT $2 OFFSET $3;
 
 -- name: CountFilePages :one
 SELECT count(*) FROM file_pages WHERE file_id = $1;
+
+-- name: SetFileTextLayerKey :exec
+-- 记录文本层的对象存储 key（text-layer/{fileId}.txt），供检索与后续调试使用。
+-- 扫描版 PDF 提取不到文本时保持 NULL，与「未提取」区分不开是有意的：
+-- 两者对下游都是「没有可用文本」。
+UPDATE files SET text_layer_key = $2 WHERE id = $1;
+
+-- name: GetPaperForFile :one
+-- 找出引用了该文件的论文：PDF 文本层要并进论文索引（PRD S-04），
+-- 而不是作为独立实体出现在结果里。
+-- 返回 0 行表示文件还没有关联论文。
+SELECT p.id AS paper_id, p.title, p.abstract
+FROM papers p
+WHERE p.pdf_file_id = $1
+LIMIT 1;

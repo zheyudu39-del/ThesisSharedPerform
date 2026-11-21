@@ -1,30 +1,87 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { ApiError } from "@/lib/http";
+import { ApiError, apiFetch } from "@/lib/http";
 import {
   SEARCH_TYPES,
   SEARCH_TYPE_LABEL,
-  search,
   searchItemHref,
   type SearchEntityType,
   type SearchItem,
+  type SearchResult,
 } from "@/lib/search";
 
 /**
  * 搜索工作区（客户端）。
  *
- * - 输入框提交或点选类型筛选时发请求；
+ * - 输入框提交或调整任意筛选时发请求；
+ * - 筛选条件（类型、时间范围、标签、作者）全部写进 URL：
+ *   刷新、分享链接、浏览器前进后退都能还原同一组结果；
  * - 结果按类型分组展示标题 + 服务端生成的高亮片段；
  * - 只展示可点进的类型（论文 / 帖子），其余类型没有站内路由，仅展示摘要。
+ *
+ * 为什么用 router.replace 而不是 push：每次改筛选都是一次「原地重查」，
+ * 用 replace 避免把每一次按键都塞进历史记录，用户点后退时回到进入搜索页之前。
  */
 const DEBOUNCE_MS = 300;
 
+/** 一次检索的完整筛选条件，与 URL 查询参数一一对应。 */
+type Filters = {
+  types: SearchEntityType[];
+  from: string;
+  to: string;
+  tag: string;
+  author: string;
+};
+
+const EMPTY_FILTERS: Filters = { types: [], from: "", to: "", tag: "", author: "" };
+
+/**
+ * 从 URL 还原筛选条件。
+ *
+ * 非法类型直接丢弃（URL 可能被手工改坏），而不是让整页报错；
+ * 后端对非法时间格式仍会返回 422，这里不做重复校验，保持单一事实来源。
+ */
+function readFilters(params: URLSearchParams): Filters {
+  const rawTypes = (params.get("type") ?? "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t): t is SearchEntityType => SEARCH_TYPES.some((o) => o.value === t));
+  return {
+    types: Array.from(new Set(rawTypes)),
+    from: params.get("from") ?? "",
+    to: params.get("to") ?? "",
+    tag: params.get("tag") ?? "",
+    author: params.get("author") ?? "",
+  };
+}
+
+/** 把筛选条件写回 URL 查询串；空值不写，保持链接干净。 */
+function buildQueryString(query: string, filters: Filters): string {
+  const params = new URLSearchParams();
+  if (query) params.set("q", query);
+  if (filters.types.length > 0) params.set("type", filters.types.join(","));
+  if (filters.from) params.set("from", filters.from);
+  if (filters.to) params.set("to", filters.to);
+  if (filters.tag) params.set("tag", filters.tag);
+  if (filters.author) params.set("author", filters.author);
+  return params.toString();
+}
+
 export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }) {
-  const [input, setInput] = useState(initialQuery);
-  const [query, setQuery] = useState(initialQuery);
-  const [types, setTypes] = useState<SearchEntityType[]>([]);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // 初始状态取自 URL：服务端已把 q 解析成 initialQuery，其余筛选在客户端读取。
+  const [input, setInput] = useState(initialQuery || searchParams.get("q") || "");
+  const [query, setQuery] = useState(initialQuery || searchParams.get("q") || "");
+  const [filters, setFilters] = useState<Filters>(() => readFilters(searchParams));
+  // 标签 / 作者是自由文本，输入时先落在本地，防抖后再并入 filters 触发检索，
+  // 避免每敲一个字就发一次请求、也避免 URL 被按键刷屏。
+  const [tagInput, setTagInput] = useState(filters.tag);
+  const [authorInput, setAuthorInput] = useState(filters.author);
   const [items, setItems] = useState<SearchItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +102,35 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
     return () => window.clearTimeout(timer);
   }, [input]);
 
-  const run = useCallback(async (text: string, selected: SearchEntityType[]) => {
+  // 标签 / 作者同样防抖：只有值真正变化时才写回 filters，避免无谓的 URL 更新。
+  useEffect(() => {
+    const trimmed = tagInput.trim();
+    const timer = window.setTimeout(() => {
+      setFilters((prev) => (prev.tag === trimmed ? prev : { ...prev, tag: trimmed }));
+    }, DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [tagInput]);
+
+  useEffect(() => {
+    const trimmed = authorInput.trim();
+    const timer = window.setTimeout(() => {
+      setFilters((prev) => (prev.author === trimmed ? prev : { ...prev, author: trimmed }));
+    }, DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [authorInput]);
+
+  // 把当前条件同步到 URL。只在条件真正变化时 replace，避免无意义的导航。
+  useEffect(() => {
+    const next = buildQueryString(query, filters);
+    const current = searchParams.toString();
+    if (next !== current) {
+      router.replace(next ? `/search?${next}` : "/search", { scroll: false });
+    }
+    // searchParams 不放进依赖：它由 replace 更新，放进来会与上面的判断互相触发。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, filters, router]);
+
+  const run = useCallback(async (text: string, active: Filters) => {
     if (!text) {
       setItems([]);
       setError(null);
@@ -55,7 +140,7 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
     setLoading(true);
     setError(null);
     try {
-      const result = await search(text, selected, 30);
+      const result = await searchWithFilters(text, active, 30);
       if (!mounted.current) return;
       setItems(result.items);
       setSearched(true);
@@ -72,8 +157,8 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
   }, []);
 
   useEffect(() => {
-    void run(query, types);
-  }, [query, types, run]);
+    void run(query, filters);
+  }, [query, filters, run]);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -81,9 +166,29 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
   }
 
   function toggleType(type: SearchEntityType) {
-    setTypes((prev) =>
-      prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type],
-    );
+    setFilters((prev) => ({
+      ...prev,
+      types: prev.types.includes(type)
+        ? prev.types.filter((t) => t !== type)
+        : [...prev.types, type],
+    }));
+  }
+
+  function patchFilters(partial: Partial<Filters>) {
+    setFilters((prev) => ({ ...prev, ...partial }));
+  }
+
+  const hasFilters =
+    filters.types.length > 0 ||
+    filters.from !== "" ||
+    filters.to !== "" ||
+    filters.tag !== "" ||
+    filters.author !== "";
+
+  function clearFilters() {
+    setFilters(EMPTY_FILTERS);
+    setTagInput("");
+    setAuthorInput("");
   }
 
   const grouped = groupByType(items);
@@ -125,7 +230,7 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
             类型
           </span>
           {SEARCH_TYPES.map((option) => {
-            const active = types.includes(option.value);
+            const active = filters.types.includes(option.value);
             return (
               <button
                 key={option.value}
@@ -142,11 +247,53 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
               </button>
             );
           })}
-          {types.length > 0 && (
+        </div>
+
+        {/* 时间 / 标签 / 作者：日期用原生 date 输入（输出 YYYY-MM-DD，后端直接接受）。 */}
+        <div className="flex flex-wrap items-end gap-3 rounded-[8px] border border-line bg-surface-2/60 px-3 py-3">
+          <label className="flex flex-col gap-1 text-[0.72rem] text-ink-3">
+            <span className="font-mono tracking-[0.1em] uppercase">起始日期</span>
+            <input
+              type="date"
+              value={filters.from}
+              onChange={(e) => patchFilters({ from: e.target.value })}
+              className="rounded-[4px] border border-line-strong bg-surface px-2 py-1.5 text-[0.82rem] text-ink focus:border-ink-3 focus:outline-none"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-[0.72rem] text-ink-3">
+            <span className="font-mono tracking-[0.1em] uppercase">结束日期</span>
+            <input
+              type="date"
+              value={filters.to}
+              onChange={(e) => patchFilters({ to: e.target.value })}
+              className="rounded-[4px] border border-line-strong bg-surface px-2 py-1.5 text-[0.82rem] text-ink focus:border-ink-3 focus:outline-none"
+            />
+          </label>
+          <label className="flex min-w-[9rem] flex-1 flex-col gap-1 text-[0.72rem] text-ink-3">
+            <span className="font-mono tracking-[0.1em] uppercase">标签</span>
+            <input
+              type="text"
+              value={tagInput}
+              onChange={(e) => setTagInput(e.target.value)}
+              placeholder="例如：机器学习"
+              className="rounded-[4px] border border-line-strong bg-surface px-2 py-1.5 text-[0.82rem] text-ink placeholder:text-ink-3 focus:border-ink-3 focus:outline-none"
+            />
+          </label>
+          <label className="flex min-w-[9rem] flex-1 flex-col gap-1 text-[0.72rem] text-ink-3">
+            <span className="font-mono tracking-[0.1em] uppercase">作者</span>
+            <input
+              type="text"
+              value={authorInput}
+              onChange={(e) => setAuthorInput(e.target.value)}
+              placeholder="@handle"
+              className="rounded-[4px] border border-line-strong bg-surface px-2 py-1.5 text-[0.82rem] text-ink placeholder:text-ink-3 focus:border-ink-3 focus:outline-none"
+            />
+          </label>
+          {hasFilters && (
             <button
               type="button"
-              onClick={() => setTypes([])}
-              className="ml-1 text-[0.76rem] text-ink-3 underline underline-offset-2 hover:text-ink"
+              onClick={clearFilters}
+              className="mb-0.5 text-[0.76rem] text-ink-3 underline underline-offset-2 hover:text-ink"
             >
               清除筛选
             </button>
@@ -166,7 +313,7 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
             <span className="flex-1">{error}</span>
             <button
               type="button"
-              onClick={() => void run(query, types)}
+              onClick={() => void run(query, filters)}
               className="shrink-0 font-semibold underline underline-offset-2"
             >
               重试
@@ -182,13 +329,15 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
           </div>
         ) : !query ? (
           <p className="rounded-[12px] border border-dashed border-line-strong bg-surface px-5 py-12 text-center text-[0.88rem] text-ink-2">
-            输入关键词开始检索。可按类型筛选，只看论文或只看帖子。
+            输入关键词开始检索。可按类型、时间、标签与作者筛选。
           </p>
         ) : searched && items.length === 0 && !error ? (
           <div className="rounded-[12px] border border-dashed border-line-strong bg-surface px-5 py-12 text-center">
             <p className="font-display text-[1.1rem] font-semibold">没有找到相关内容</p>
             <p className="mx-auto mt-2 max-w-[40ch] text-[0.88rem] leading-relaxed text-ink-2">
-              换个关键词试试，或清除类型筛选扩大范围。
+              {hasFilters
+                ? "试试放宽筛选条件：换一个时间范围、去掉标签或作者限制，或清除类型筛选。"
+                : "换个关键词试试，或清除类型筛选扩大范围。"}
             </p>
           </div>
         ) : (
@@ -222,6 +371,58 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
       </div>
     </main>
   );
+}
+
+/**
+ * 带筛选条件的检索。
+ *
+ * 没有扩展 lib/search.ts 的 search()：那个函数被其它页面复用，
+ * 筛选参数只有本工作区需要；在这里直接拼请求可以避免改动共享契约。
+ * 响应解析规则与 search() 保持一致（entityType 必须是四种已知类型）。
+ */
+async function searchWithFilters(
+  text: string,
+  filters: Filters,
+  limit: number,
+): Promise<SearchResult> {
+  const params = new URLSearchParams({
+    q: text,
+    limit: String(Math.min(Math.max(limit, 1), 50)),
+  });
+  if (filters.types.length > 0) params.set("type", filters.types.join(","));
+  if (filters.from) params.set("from", filters.from);
+  if (filters.to) params.set("to", filters.to);
+  if (filters.tag) params.set("tag", filters.tag);
+  if (filters.author) params.set("author", filters.author);
+
+  const body = await apiFetch<unknown>(`/search?${params.toString()}`);
+  if (!isRecord(body) || !Array.isArray(body.items)) {
+    throw new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);
+  }
+  const items = body.items
+    .map(normalizeItem)
+    .filter((item): item is SearchItem => item !== null);
+  return {
+    items,
+    total: typeof body.total === "number" && Number.isFinite(body.total) ? body.total : items.length,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeItem(value: unknown): SearchItem | null {
+  if (!isRecord(value) || typeof value.entityId !== "string") return null;
+  const entityType = SEARCH_TYPES.find((o) => o.value === value.entityType)?.value;
+  if (!entityType) return null;
+  return {
+    entityType,
+    entityId: value.entityId,
+    title: typeof value.title === "string" ? value.title : "",
+    snippet: typeof value.snippet === "string" ? value.snippet : "",
+    rank: typeof value.rank === "number" && Number.isFinite(value.rank) ? value.rank : 0,
+  };
 }
 
 function ResultCard({ item }: { item: SearchItem }) {

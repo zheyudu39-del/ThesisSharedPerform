@@ -94,6 +94,7 @@ export function SiteHeader() {
             <UserMenu
               name={user.name}
               handle={user.handle}
+              isAdmin={user.role === "admin"}
               onSignOut={() => {
                 void signOut();
                 router.push("/");
@@ -126,10 +127,13 @@ function SearchIcon() {
 function UserMenu({
   name,
   handle,
+  isAdmin,
   onSignOut,
 }: {
   name: string;
   handle: string;
+  /** 运营入口只在角色为 admin 时展示；真正的授权仍在服务端。 */
+  isAdmin: boolean;
   onSignOut: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -203,6 +207,27 @@ function UserMenu({
             >
               个人主页
             </Link>
+            {/* 收藏是个人入口：放用户菜单而不是主导航，避免占满公共导航。 */}
+            <Link
+              href="/bookmarks"
+              role="menuitem"
+              onClick={() => setOpen(false)}
+              className="rounded-[6px] px-3 py-2 text-left text-sm text-ink-2 hover:bg-surface-2 hover:text-ink"
+            >
+              我的收藏
+            </Link>
+            {/* 运营后台入口：仅 admin 可见。页面本身不做安全边界，
+                非 admin 直接访问也会被服务端 403 拦下。 */}
+            {isAdmin && (
+              <Link
+                href="/admin/reports"
+                role="menuitem"
+                onClick={() => setOpen(false)}
+                className="rounded-[6px] px-3 py-2 text-left text-sm text-ink-2 hover:bg-surface-2 hover:text-ink"
+              >
+                举报审核
+              </Link>
+            )}
             <Link
               href="/settings"
               role="menuitem"

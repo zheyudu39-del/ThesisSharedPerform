@@ -96,6 +96,28 @@ export async function createSnapshot(id: string, label?: string): Promise<{ snap
   });
 }
 
+export type RestoreResult = {
+  /** 被回滚到的版本。 */
+  restoredFrom: number;
+  /** 回滚动作产生的新版本号（单调递增，不会被旧版本号覆盖）。 */
+  newVersion: number;
+  /** 恒为 true：协同服务内存里的 Y.Doc 需要重新加载才生效。 */
+  requiresReconnect: boolean;
+};
+
+/**
+ * 回滚到指定快照版本（PRD D-04）。
+ *
+ * 服务端只改「最新快照指针」，不碰协同服务内存中的 Y.Doc。
+ * 因此调用方必须在成功后让编辑器重新连接（刷新页面是最可靠的做法），
+ * 否则看到的仍是回滚前的正文。
+ */
+export async function restoreSnapshot(id: string, version: number): Promise<RestoreResult> {
+  return apiFetch(`/documents/${encodeURIComponent(id)}/snapshots/${version}/restore`, {
+    method: "POST",
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /* 批注                                                                        */
 /* -------------------------------------------------------------------------- */

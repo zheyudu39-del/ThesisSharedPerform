@@ -105,6 +105,29 @@ func (q *Queries) GetFileByID(ctx context.Context, id pgtype.UUID) (File, error)
 	return i, err
 }
 
+const getPaperForFile = `-- name: GetPaperForFile :one
+SELECT p.id AS paper_id, p.title, p.abstract
+FROM papers p
+WHERE p.pdf_file_id = $1
+LIMIT 1
+`
+
+type GetPaperForFileRow struct {
+	PaperID  pgtype.UUID `json:"paper_id"`
+	Title    string      `json:"title"`
+	Abstract *string     `json:"abstract"`
+}
+
+// 找出引用了该文件的论文：PDF 文本层要并进论文索引（PRD S-04），
+// 而不是作为独立实体出现在结果里。
+// 返回 0 行表示文件还没有关联论文。
+func (q *Queries) GetPaperForFile(ctx context.Context, pdfFileID pgtype.UUID) (GetPaperForFileRow, error) {
+	row := q.db.QueryRow(ctx, getPaperForFile, pdfFileID)
+	var i GetPaperForFileRow
+	err := row.Scan(&i.PaperID, &i.Title, &i.Abstract)
+	return i, err
+}
+
 const insertFilePage = `-- name: InsertFilePage :exec
 INSERT INTO file_pages (file_id, page_no, image_key, width, height, text_chars)
 VALUES ($1, $2, $3, $4, $5, $6)
@@ -329,6 +352,23 @@ func (q *Queries) MarkFileUploaded(ctx context.Context, arg MarkFileUploadedPara
 		&i.ReadyAt,
 	)
 	return i, err
+}
+
+const setFileTextLayerKey = `-- name: SetFileTextLayerKey :exec
+UPDATE files SET text_layer_key = $2 WHERE id = $1
+`
+
+type SetFileTextLayerKeyParams struct {
+	ID           pgtype.UUID `json:"id"`
+	TextLayerKey *string     `json:"text_layer_key"`
+}
+
+// 记录文本层的对象存储 key（text-layer/{fileId}.txt），供检索与后续调试使用。
+// 扫描版 PDF 提取不到文本时保持 NULL，与「未提取」区分不开是有意的：
+// 两者对下游都是「没有可用文本」。
+func (q *Queries) SetFileTextLayerKey(ctx context.Context, arg SetFileTextLayerKeyParams) error {
+	_, err := q.db.Exec(ctx, setFileTextLayerKey, arg.ID, arg.TextLayerKey)
+	return err
 }
 
 const updateFileStatus = `-- name: UpdateFileStatus :one

@@ -5,6 +5,7 @@ import type { Editor } from "@tiptap/react";
 import { useAuth } from "@/components/AuthProvider";
 import { DocumentEditor } from "@/components/DocumentEditor";
 import { DocSidebar } from "@/components/DocSidebar";
+import { ReferencePanel } from "@/components/ReferencePanel";
 import {
   EXPORT_FORMAT_LABEL,
   exportDocument,
@@ -179,7 +180,15 @@ export function DocumentWorkspace({
           userId={user?.id ?? "anonymous"}
           onReady={handleEditorReady}
         />
-        <DocSidebar documentId={doc.id} canEdit={canEdit} />
+        {/*
+          侧栏：快照/批注在上，引用面板在下。
+          引用面板单独成块而不是塞进 DocSidebar 的 Tab：它需要常驻可见，
+          用户写正文时切格式预览参考文献的频率远高于翻批注。
+        */}
+        <div className="flex flex-col gap-3">
+          <DocSidebar documentId={doc.id} canEdit={canEdit} />
+          <ReferencePanel documentId={doc.id} canEdit={canEdit} />
+        </div>
       </div>
     </div>
   );

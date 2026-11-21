@@ -157,6 +157,39 @@ type Indexer interface {
 	Index(ctx context.Context, doc SearchDocument) error
 }
 
+// NotifyInput 描述一条待生成的通知，字段与 notify.CreateInput 一一对应。
+// 与 SearchDocument 同理，这里重新声明一份而不直接引用 notify 包。
+type NotifyInput struct {
+	UserID     uuid.UUID
+	Type       string
+	ActorID    uuid.UUID
+	TargetType string
+	TargetID   uuid.UUID
+	Payload    map[string]any
+}
+
+// Notifier 是通知生成的抽象，由 server 注入 notify.Service 的适配器。
+// 为 nil 时跳过通知（单元测试或未接入通知的部署），业务写入不受影响。
+type Notifier interface {
+	Notify(ctx context.Context, input NotifyInput) error
+}
+
+// managerQuerier 查询「谁应该收到管理类通知」。
+//
+// 单独抽成接口而不是塞进 Querier：Querier 被单测替身完整实现，
+// 往里加方法会让既有替身编译失败；且该查询只服务于通知，不是群组业务本身。
+type managerQuerier interface {
+	ListGroupManagerIDs(ctx context.Context, groupID pgtype.UUID) ([]pgtype.UUID, error)
+}
+
+// dbManagerQuerier 用生成查询取回群主与管理员。
+// 群主在 group_members 里也有一行 role='owner'，因此无需再查 groups.owner_id。
+type dbManagerQuerier struct{ queries *db.Queries }
+
+func (q dbManagerQuerier) ListGroupManagerIDs(ctx context.Context, groupID pgtype.UUID) ([]pgtype.UUID, error) {
+	return q.queries.ListGroupManagerIDs(ctx, groupID)
+}
+
 // Service 实现群组领域逻辑。
 type Service struct {
 	pool    *pgxpool.Pool
@@ -164,15 +197,22 @@ type Service struct {
 	now     func() time.Time
 	// indexer 可选：nil 时跳过索引。
 	indexer Indexer
+	// notifier 可选：nil 时跳过通知生成。
+	notifier Notifier
+	// managers 可选：入群申请通知的收件人查询。为 nil 时跳过该通知。
+	managers managerQuerier
 }
 
 // NewService 构造服务。pool 为 nil 时只读路径可用（测试替身场景）。
 func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, queries: db.New(pool), now: time.Now}
+	return &Service{pool: pool, queries: db.New(pool), now: time.Now, managers: dbManagerQuerier{queries: db.New(pool)}}
 }
 
 // SetIndexer 注入检索索引实现；不注入时索引被静默跳过。
 func (s *Service) SetIndexer(indexer Indexer) { s.indexer = indexer }
+
+// SetNotifier 注入通知实现；不注入时入群申请等事件不产生通知。
+func (s *Service) SetNotifier(notifier Notifier) { s.notifier = notifier }
 
 // newServiceWithQuerier 用于测试注入替身；写路径在没有连接池时直接使用替身。
 func newServiceWithQuerier(queries Querier) *Service {
@@ -670,6 +710,8 @@ func (s *Service) CreateJoinRequest(ctx context.Context, userID uuid.UUID, slug,
 		return JoinRequest{}, fmt.Errorf("%w: 申请留言不能超过 280 个字符", ErrValidation)
 	}
 	var created db.JoinRequest
+	var groupID, ownerID uuid.UUID
+	var groupSlug string
 	err := s.withTx(ctx, func(q Querier) error {
 		group, actorRole, err := loadGroupForActor(ctx, q, userID, slug)
 		if err != nil {
@@ -695,15 +737,66 @@ func (s *Service) CreateJoinRequest(ctx context.Context, userID uuid.UUID, slug,
 			return fmt.Errorf("提交入群申请失败: %w", err)
 		}
 		created = record
+		groupID, ownerID = group.ID.Bytes, group.OwnerID.Bytes
+		groupSlug = stringValue(group.Slug)
 		return nil
 	})
 	if err != nil {
 		return JoinRequest{}, err
 	}
+	// 通知放在提交之后：群主/管理员收不到提醒只是体验问题，
+	// 不能让已经写好的申请因为通知失败而回滚。
+	s.notifyJoinRequest(ctx, groupID, ownerID, userID, created.ID.Bytes, groupSlug)
 	return JoinRequest{
 		ID: created.ID.Bytes, Status: string(created.Status),
 		Message: stringValue(created.Message), CreatedAt: created.CreatedAt.Time.UTC(),
 	}, nil
+}
+
+// notifyJoinRequest 给群主与所有管理员发入群申请提醒。
+//
+// 申请人自己不会收到（由 notify 服务层的自行为判断兜底，这里提前跳过省一次调用）；
+// 群主若同时也是 admin 行只会在查询结果里出现一次，无需额外去重。
+// payload 带 slug 与申请人 handle，前端跳转与文案都用得上。
+func (s *Service) notifyJoinRequest(ctx context.Context, groupID, ownerID, applicantID, requestID uuid.UUID, groupSlug string) {
+	if s.notifier == nil || s.managers == nil || groupID == uuid.Nil {
+		return
+	}
+	managers, err := s.managers.ListGroupManagerIDs(ctx, uuidParam(groupID))
+	if err != nil {
+		slog.Error("查询群管理员失败", "groupId", groupID, "err", err)
+		return
+	}
+	recipients := make(map[uuid.UUID]struct{}, len(managers)+1)
+	for _, id := range managers {
+		if id.Valid {
+			recipients[uuid.UUID(id.Bytes)] = struct{}{}
+		}
+	}
+	// 兜底：即使成员表暂时缺失群主行，也要提醒群主。
+	if ownerID != uuid.Nil {
+		recipients[ownerID] = struct{}{}
+	}
+	for recipient := range recipients {
+		if recipient == applicantID {
+			continue
+		}
+		payload := map[string]any{"requestId": requestID.String()}
+		// 群组路由按 slug 而不是 ID，带上 slug 前端才能直接拼出可点击的链接。
+		if groupSlug != "" {
+			payload["slug"] = groupSlug
+		}
+		if err := s.notifier.Notify(ctx, NotifyInput{
+			UserID:     recipient,
+			Type:       "join_request",
+			ActorID:    applicantID,
+			TargetType: "group",
+			TargetID:   groupID,
+			Payload:    payload,
+		}); err != nil {
+			slog.Error("生成入群申请通知失败", "groupId", groupID, "userId", recipient, "err", err)
+		}
+	}
 }
 
 // ListJoinRequests 列出待处理的入群申请，仅 owner/admin 可调用。

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { GroupAdminPanel } from "@/components/GroupAdminPanel";
 import { GroupDocuments } from "@/components/GroupDocuments";
+import { GroupFiles } from "@/components/GroupFiles";
 import { GroupFeed } from "@/app/groups/[slug]/GroupFeed";
 import { GroupJoinButton, GroupMemberCount } from "@/components/GroupMembership";
 import { GroupMembersPreview } from "@/app/groups/[slug]/GroupMembersPreview";
@@ -161,6 +162,17 @@ export default async function GroupPage({ params }: PageProps) {
               </span>
             </h2>
             <GroupDocuments slug={group.slug} isMember={isMember} />
+          </section>
+
+          {/* 主栏：群文件库（PRD G-05） */}
+          <section className="min-w-0">
+            <h2 className="mb-4 flex items-baseline gap-2 border-b border-line pb-2.5">
+              <span className="font-display text-[1.15rem] font-semibold">文件库</span>
+              <span className="font-mono text-[0.7rem] tracking-[0.06em] text-ink-3 uppercase">
+                Files
+              </span>
+            </h2>
+            <GroupFiles slug={group.slug} isMember={isMember} />
           </section>
 
           {/* 主栏：群内动态 */}

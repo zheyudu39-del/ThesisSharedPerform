@@ -7,8 +7,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thesis-shared/api/internal/config"
+	"github.com/thesis-shared/api/internal/citation"
 	"github.com/thesis-shared/api/internal/content"
 	"github.com/thesis-shared/api/internal/curation"
 	"github.com/thesis-shared/api/internal/doc"
@@ -17,6 +19,7 @@ import (
 	"github.com/thesis-shared/api/internal/handler"
 	"github.com/thesis-shared/api/internal/identity"
 	appmiddleware "github.com/thesis-shared/api/internal/middleware"
+	"github.com/thesis-shared/api/internal/moderation"
 	"github.com/thesis-shared/api/internal/notify"
 	"github.com/thesis-shared/api/internal/openapi"
 	"github.com/thesis-shared/api/internal/paper"
@@ -80,6 +83,17 @@ func New(d Deps) *http.Server {
 	curationSvc := curation.NewService(d.Pool)
 	curations := handler.NewCurationHandler(curationSvc)
 
+	// 举报与屏蔽（PRD F-06）。屏蔽在查询层生效（见 posts.sql 的 feed 查询），
+	// 这里只负责举报的写入与运营侧审核。
+	moderationSvc := moderation.NewService(d.Pool)
+	moderations := handler.NewModerationHandler(moderationSvc)
+
+	// 引用管理（PRD D-06）与群文件库（PRD G-05）。
+	// 两者都通过适配器注入 Querier：领域包不直接依赖 sqlc 生成类型。
+	citationSvc := citation.NewService(citation.NewPGQuerier(d.Pool))
+	citations := handler.NewCitationHandler(citationSvc)
+	groupFiles := handler.NewGroupFileHandler(group.NewFileService(group.NewPGGroupFilesQuerier(d.Pool)))
+
 	// 开放 API：密钥管理与只读数据端点。
 	// 数据端点挂在 /openapi/v1 独立前缀下，用 X-API-Key 认证，不读 Cookie，
 	// 因此与内部 API 的 CSRF 体系完全隔离。
@@ -118,6 +132,15 @@ func New(d Deps) *http.Server {
 			r.Get("/users/me", auth.Me)
 			r.Get("/feed", contents.Feed)
 
+			// 收藏列表：按收藏时间倒序，复用信息流的 PostDTO 形状与可见性谓词。
+			r.Get("/bookmarks", contents.Bookmarks)
+
+			// 举报与屏蔽的只读接口。
+			// 举报列表只对运营开放，服务层二次判定 role='admin'。
+			r.Get("/reports", moderations.ListReports)
+			r.Get("/blocks", moderations.ListBlocks)
+			r.Get("/users/{handle}/block", moderations.GetBlockStatus)
+
 			// 开放 API 密钥只读：只返回元数据（前缀、scopes、最后使用时间），
 			// 不含明文或哈希，因此与其它只读接口一样不需要 CSRF。
 			r.Get("/api-keys", openAPI.ListKeys)
@@ -140,7 +163,17 @@ func New(d Deps) *http.Server {
 			r.Get("/documents/{id}/collab-token", documents.CollabToken)
 			r.Get("/documents/{id}/members", documents.Members)
 			r.Get("/documents/{id}/snapshots", documents.Snapshots)
+			// 下载指定版本的快照二进制（限 editor 及以上）。
+			r.Get("/documents/{id}/snapshots/{version}/download", documents.DownloadSnapshot)
 			r.Get("/documents/{id}/annotations", documents.Annotations)
+
+			// 引用与参考文献（PRD D-06）。只读部分：列表与渲染后的文献表。
+			// 参考文献表是「渲染时」的决定，切换格式不改正文。
+			r.Get("/documents/{id}/references", citations.ListReferences)
+			r.Get("/documents/{id}/bibliography", citations.Bibliography)
+
+			// 群文件库（PRD G-05）：只读列表，仅群成员可读。
+			r.Get("/groups/{slug}/files", groupFiles.List)
 
 			// 写接口：会话 Cookie 由浏览器自动携带，必须用双提交令牌区分
 			// 「本站发起」与「第三方站点伪造」，否则存在 CSRF 风险。
@@ -161,6 +194,17 @@ func New(d Deps) *http.Server {
 				r.Post("/posts/{id}/bookmark", contents.Bookmark)
 				r.Delete("/posts/{id}/bookmark", contents.Unbookmark)
 				r.Post("/posts/{id}/comments", contents.CreateComment)
+
+				// 帖子编辑与删除：仅作者本人或运营。编辑不改变类型与关联，
+				// 否则等于换了一条内容；删除是软删除，不影响被转发的原帖。
+				r.Patch("/posts/{id}", contents.UpdatePost)
+				r.Delete("/posts/{id}", contents.DeletePost)
+
+				// 举报与屏蔽。屏蔽立即生效，在 feed 查询层过滤（不是 handler 层）。
+				r.Post("/reports", moderations.CreateReport)
+				r.Patch("/reports/{id}", moderations.UpdateReport)
+				r.Post("/users/{handle}/block", moderations.Block)
+				r.Delete("/users/{handle}/block", moderations.Unblock)
 
 				// 群组写操作。建群、改群、成员与角色、邀请码、入群申请都在这里；
 				// 具体权限（owner > admin > member）由 group 服务层判定。
@@ -190,6 +234,19 @@ func New(d Deps) *http.Server {
 				r.Patch("/documents/{id}/members/{userId}", documents.UpdateMember)
 				r.Delete("/documents/{id}/members/{userId}", documents.RemoveMember)
 
+				// 快照回滚：不复制二进制，新记录引用旧快照的 storage_key。
+				// 响应带 requiresReconnect，前端需要重连协同服务才能真正生效。
+				r.Post("/documents/{id}/snapshots/{version}/restore", documents.RestoreSnapshot)
+
+				// 引用写入：BibTeX 导入是幂等的，重复 cite_key 走更新而非报错。
+				r.Post("/documents/{id}/references/import", citations.ImportReferences)
+				r.Post("/documents/{id}/references", citations.AddReference)
+				r.Delete("/documents/{id}/references/{refId}", citations.DeleteReference)
+
+				// 群文件库写入：存入的是「指向已有文件的引用」，不复制文件本体。
+				r.Post("/groups/{slug}/files", groupFiles.Save)
+				r.Delete("/groups/{slug}/files/{id}", groupFiles.Delete)
+
 				// 策展写操作。策展资格（运营 / 认证大V）与「只能改自己的集合」
 				// 由 curation 服务层判定，返回 403 而非 404：策展集是公开内容，
 				// 隐藏其存在性没有意义，明确告知「无权限」更有助于运营排查。
@@ -213,7 +270,7 @@ func New(d Deps) *http.Server {
 				// 文件上传流水线（PRD V-01~V-07 / P-05）。
 				// 对象存储不可用时（d.Storage == nil）不注册，避免出现必然失败的接口。
 				if d.Storage != nil {
-					files := handler.NewFileHandler(file.NewService(d.Pool, d.Storage))
+					files := handler.NewFileHandlerWithIndexer(file.NewService(d.Pool, d.Storage), searchSvc)
 					r.Post("/files/presign", files.Presign)
 					r.Post("/files/{id}/complete", files.Complete)
 				}
@@ -221,7 +278,7 @@ func New(d Deps) *http.Server {
 
 			// 文件读取：只读，无需 CSRF。
 			if d.Storage != nil {
-				files := handler.NewFileHandler(file.NewService(d.Pool, d.Storage))
+				files := handler.NewFileHandlerWithIndexer(file.NewService(d.Pool, d.Storage), searchSvc)
 				r.Get("/files/{id}", files.Get)
 				r.Get("/files/{id}/pages", files.Pages)
 			}
@@ -295,6 +352,14 @@ func (a contentIndexer) Index(ctx context.Context, doc content.SearchDocument) e
 		Title:      doc.Title,
 		Body:       doc.Body,
 	})
+}
+
+// Remove 让帖子删除后立刻从检索结果里消失。
+//
+// content 包通过运行时类型断言探测这个方法（见 content.Service.removeFromIndex）：
+// Indexer 接口保持只有 Index，避免所有现有测试替身都要多实现一个方法。
+func (a contentIndexer) Remove(ctx context.Context, entityType string, entityID uuid.UUID) error {
+	return a.service.Remove(ctx, entityType, entityID)
 }
 
 // groupIndexer 把 search.Service 适配成 group.Indexer。

@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -22,11 +25,23 @@ type DocumentHandler struct {
 	tokens *identity.TokenManager
 	// wsPublicURL 是浏览器连接协同服务的地址。
 	wsPublicURL string
+	// storage 可选：快照下载需要读对象存储。为 nil 时下载接口返回 503，
+	// 其余接口不受影响（对象存储是可选依赖，见 server.go 的注册条件）。
+	storage SnapshotStorage
+}
+
+// SnapshotStorage 是快照下载对对象存储的最小依赖。
+// 用接口而不是 *storage.Client，既便于测试，也避免 handler 包直接依赖 S3 SDK。
+type SnapshotStorage interface {
+	Get(ctx context.Context, key string) (io.ReadCloser, error)
 }
 
 func NewDocumentHandler(service *doc.Service, tokens *identity.TokenManager, wsPublicURL string) *DocumentHandler {
 	return &DocumentHandler{service: service, tokens: tokens, wsPublicURL: wsPublicURL}
 }
+
+// SetStorage 注入对象存储，供快照下载使用；不注入时该接口返回 503。
+func (h *DocumentHandler) SetStorage(store SnapshotStorage) { h.storage = store }
 
 // ---------------------------------------------------------------------------
 // 文档 CRUD
@@ -256,6 +271,92 @@ func (h *DocumentHandler) CreateSnapshot(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"snapshot": snapshot})
+}
+
+// ---------------------------------------------------------------------------
+// 快照回滚（PRD D-04）
+// ---------------------------------------------------------------------------
+
+// DownloadSnapshot 处理 GET /api/v1/documents/{id}/snapshots/{version}/download。
+//
+// 正文是 Yjs 二进制（Y.encodeStateAsUpdate 的产物），直接以附件返回，
+// 供前端在本地重建一份文档或做离线备份。权限要求 editor 及以上。
+func (h *DocumentHandler) DownloadSnapshot(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+	docID, version, ok := h.docAndVersion(w, r)
+	if !ok {
+		return
+	}
+	content, err := h.service.SnapshotForDownload(r.Context(), userID, docID, version)
+	if err != nil {
+		writeDocError(w, err)
+		return
+	}
+	if h.storage == nil {
+		WriteError(w, http.StatusServiceUnavailable, "storage_unavailable", "对象存储未配置，无法下载快照")
+		return
+	}
+	body, err := h.storage.Get(r.Context(), content.Key)
+	if err != nil {
+		// 快照记录存在但对象丢失：这是数据不一致，不是客户端错误。
+		slog.Error("读取快照对象失败", "err", err, "key", content.Key)
+		WriteError(w, http.StatusNotFound, "snapshot_content_missing", "该版本的快照内容已不存在")
+		return
+	}
+	defer func() { _ = body.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(body, maxSnapshotBytes))
+	if err != nil {
+		slog.Error("读取快照内容失败", "err", err, "key", content.Key)
+		WriteError(w, http.StatusInternalServerError, "internal_error", "服务暂时不可用")
+		return
+	}
+	filename := fmt.Sprintf("%s-v%d.bin", docID, content.Version)
+	writeDownload(w, filename, "application/octet-stream", data)
+}
+
+// RestoreSnapshot 处理 POST /api/v1/documents/{id}/snapshots/{version}/restore。
+//
+// 响应体 { restoredFrom, newVersion, requiresReconnect }：
+// requiresReconnect 恒为 true，前端必须断开协同连接后重新加载，
+// 否则内存里的 Y.Doc 仍是回滚前的状态（详见 doc.RestoreResult 的说明）。
+func (h *DocumentHandler) RestoreSnapshot(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+	docID, version, ok := h.docAndVersion(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.RestoreSnapshot(r.Context(), userID, docID, version)
+	if err != nil {
+		writeDocError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// maxSnapshotBytes 限制单次快照下载的读取量。
+// Yjs 全量状态对长文档通常在几 MB 以内，64MB 足以覆盖极端情况。
+const maxSnapshotBytes = 64 << 20
+
+// docAndVersion 解析路径里的文档 ID 与快照版本号。
+func (h *DocumentHandler) docAndVersion(w http.ResponseWriter, r *http.Request) (uuid.UUID, int32, bool) {
+	docID, ok := docIDFromPath(w, r)
+	if !ok {
+		return uuid.Nil, 0, false
+	}
+	raw := chi.URLParam(r, "version")
+	version, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil || version <= 0 {
+		WriteError(w, http.StatusUnprocessableEntity, "validation_error", "快照版本号须为正整数")
+		return uuid.Nil, 0, false
+	}
+	return docID, int32(version), true
 }
 
 // ---------------------------------------------------------------------------

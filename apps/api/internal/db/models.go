@@ -877,6 +877,28 @@ type DocMember struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type DocReference struct {
+	ID        pgtype.UUID        `json:"id"`
+	DocID     pgtype.UUID        `json:"doc_id"`
+	PaperID   pgtype.UUID        `json:"paper_id"`
+	CiteKey   string             `json:"cite_key"`
+	EntryType string             `json:"entry_type"`
+	Title     string             `json:"title"`
+	Authors   []byte             `json:"authors"`
+	Year      *int32             `json:"year"`
+	Container *string            `json:"container"`
+	Volume    *string            `json:"volume"`
+	Issue     *string            `json:"issue"`
+	Pages     *string            `json:"pages"`
+	Doi       *string            `json:"doi"`
+	Url       *string            `json:"url"`
+	Publisher *string            `json:"publisher"`
+	RawBibtex *string            `json:"raw_bibtex"`
+	CreatedBy pgtype.UUID        `json:"created_by"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
 type DocSnapshot struct {
 	DocID      pgtype.UUID        `json:"doc_id"`
 	Version    int32              `json:"version"`
@@ -957,6 +979,18 @@ type Group struct {
 	MemberCount int32              `json:"member_count"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	DeletedAt   pgtype.Timestamptz `json:"deleted_at"`
+}
+
+type GroupFile struct {
+	ID          pgtype.UUID        `json:"id"`
+	GroupID     pgtype.UUID        `json:"group_id"`
+	FileID      pgtype.UUID        `json:"file_id"`
+	PostID      pgtype.UUID        `json:"post_id"`
+	Title       string             `json:"title"`
+	Description *string            `json:"description"`
+	Tags        []string           `json:"tags"`
+	AddedBy     pgtype.UUID        `json:"added_by"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
 type GroupInvite struct {

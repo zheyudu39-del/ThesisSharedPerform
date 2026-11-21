@@ -5,6 +5,7 @@ import {
   createSnapshot,
   listAnnotations,
   listSnapshots,
+  restoreSnapshot,
   updateAnnotation,
   type AnnotationDTO,
   type SnapshotDTO,
@@ -23,6 +24,10 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  // 正在回滚的版本号；非 null 时禁用所有回滚按钮，避免并发触发。
+  const [restoring, setRestoring] = useState<number | null>(null);
+  // 回滚成功后的提示。不回滚提示「已生效」——必须刷新才能看到旧版本。
+  const [restored, setRestored] = useState<{ from: number; to: number } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -52,6 +57,31 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
       setError(err instanceof Error ? err.message : "创建快照失败");
     } finally {
       setCreating(false);
+    }
+  }
+
+  /**
+   * 回滚到指定版本。
+   *
+   * 二次确认是必要的：回滚会改变所有人看到的正文，而且协同服务内存里的
+   * Y.Doc 不会自动重置，必须刷新页面才会加载旧版本——这两点都不能让
+   * 用户「点一下才发现」。
+   */
+  async function handleRestore(version: number) {
+    if (!window.confirm(`确定回滚到版本 ${version}？当前正文将被替换，且需要刷新页面才会生效。`)) {
+      return;
+    }
+    setRestoring(version);
+    setError(null);
+    setRestored(null);
+    try {
+      const result = await restoreSnapshot(documentId, version);
+      setRestored({ from: result.restoredFrom, to: result.newVersion });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "回滚失败");
+    } finally {
+      setRestoring(null);
     }
   }
 
@@ -104,15 +134,48 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
             <ul className="flex flex-col gap-2">
               {snapshots.map((s) => (
                 <li key={s.version} className="border-b border-line pb-2 last:border-0 last:pb-0">
-                  <p className="text-[0.82rem] font-medium">
-                    {s.label || `版本 ${s.version}`}
-                  </p>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <p className="text-[0.82rem] font-medium">
+                      {s.label || `版本 ${s.version}`}
+                    </p>
+                    {canEdit && (
+                      <button
+                        type="button"
+                        onClick={() => void handleRestore(s.version)}
+                        disabled={restoring !== null}
+                        className="shrink-0 rounded-[3px] px-1.5 py-0.5 text-[0.7rem] text-ink-3 hover:bg-seal-wash hover:text-seal disabled:opacity-50"
+                      >
+                        {restoring === s.version ? "回滚中…" : "回滚到此版本"}
+                      </button>
+                    )}
+                  </div>
                   <p className="font-mono text-[0.68rem] text-ink-3">
                     {formatTime(s.createdAt)} · {formatBytes(s.sizeBytes)}
                   </p>
                 </li>
               ))}
             </ul>
+          )}
+
+          {/*
+            回滚成功提示：明确说「需要刷新」，而不是假装已经生效。
+            协同服务（apps/ws）把 Y.Doc 放在内存里，REST 侧改快照指针
+            不会影响已连接的会话，只有重新加载文档才会读到旧版本。
+          */}
+          {restored && (
+            <div className="mt-3 rounded-[6px] border border-warn/40 bg-warn-wash px-3 py-2">
+              <p className="text-[0.75rem] leading-relaxed text-warn">
+                已标记回滚到版本 {restored.from}（生成新版本 {restored.to}）。
+                协同编辑器仍持有回滚前的正文，请刷新页面以加载该版本。
+              </p>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="mt-1.5 rounded-[3px] bg-warn px-2 py-0.5 text-[0.72rem] font-semibold text-white hover:opacity-90"
+              >
+                刷新页面
+              </button>
+            </div>
           )}
         </section>
       )}

@@ -112,6 +112,9 @@ WHERE p.deleted_at IS NULL AND p.group_id IS NULL
   -- 可见性：本人可见全部；他人帖子只允许 public 或 followers。
   -- followers 已由上一行的关注关系保证，因此这里不能再放宽，否则未关注者也能看到。
   AND (p.author_id = $1 OR p.visibility IN ('public', 'followers'))
+  -- 屏蔽：被当前用户屏蔽的作者，其帖子不出现在信息流里。
+  -- 在查询层过滤而不是 handler 层：handler 过滤会漏掉分页与计数。
+  AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.blocker_id = $1 AND b.blocked_id = p.author_id)
   AND ($2::timestamptz IS NULL OR (p.created_at, p.id) < ($2::timestamptz, $3::uuid))
 ORDER BY p.created_at DESC, p.id DESC
 LIMIT $4;
@@ -143,6 +146,9 @@ LEFT JOIN posts rp ON rp.id = p.repost_of AND rp.deleted_at IS NULL
 LEFT JOIN users ru ON ru.id = rp.author_id
 LEFT JOIN papers rpp ON rpp.id = rp.paper_id
 WHERE p.deleted_at IS NULL AND p.visibility = 'public' AND p.group_id IS NULL
+  -- 屏蔽：被当前用户屏蔽的作者，其帖子不出现在信息流里。
+  -- 在查询层过滤而不是 handler 层：handler 过滤会漏掉分页与计数。
+  AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.blocker_id = $1 AND b.blocked_id = p.author_id)
   AND ($2::timestamptz IS NULL OR (p.created_at, p.id) < ($2::timestamptz, $3::uuid))
 ORDER BY p.created_at DESC, p.id DESC
 LIMIT $4;
@@ -179,6 +185,9 @@ LEFT JOIN posts rp ON rp.id = p.repost_of AND rp.deleted_at IS NULL
 LEFT JOIN users ru ON ru.id = rp.author_id
 LEFT JOIN papers rpp ON rpp.id = rp.paper_id
 WHERE p.deleted_at IS NULL AND p.visibility = 'public' AND p.group_id IS NULL
+  -- 屏蔽：被当前用户屏蔽的作者，其帖子不出现在信息流里。
+  -- 在查询层过滤而不是 handler 层：handler 过滤会漏掉分页与计数。
+  AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.blocker_id = $1 AND b.blocked_id = p.author_id)
   AND ($2::real = 'Infinity'::real OR (p.hot_score, p.created_at, p.id) < ($2::real, $3::timestamptz, $4::uuid))
 ORDER BY p.hot_score DESC, p.created_at DESC, p.id DESC
 LIMIT $5;
@@ -188,3 +197,29 @@ LIMIT $5;
 SELECT gm.role FROM group_members gm
 JOIN groups g ON g.id = gm.group_id
 WHERE gm.group_id = $1 AND gm.user_id = $2 AND g.deleted_at IS NULL;
+
+-- name: GetPostAuthorAndType :one
+-- 编辑/删除前的权限判定依据：作者用于区分「本人」与「他人」，
+-- type 用于决定正文能否为空（转发可以只转发不附言，原创帖不行），
+-- group_id 用于阻止把群内帖改成公开帖（那等于把群内容泄露到全站）。
+-- 这里刻意不套可见性谓词：运营需要能处理自己看不到的私密违规帖。
+SELECT author_id, type::text AS type, group_id
+FROM posts
+WHERE id = $1 AND deleted_at IS NULL;
+
+-- name: UpdatePost :execrows
+-- 局部更新：参数为 NULL 表示「本次不修改」。
+-- 正文同时写入 content_html / content_text，两者必须一起改，
+-- 否则展示与检索、纯文本导出会读到不一致的内容。
+-- type / paper_id / repost_of / group_id 不在可改范围内：改这些等于换了一条内容。
+UPDATE posts SET
+    content_html = COALESCE(sqlc.narg('content_html')::text, content_html),
+    content_text = COALESCE(sqlc.narg('content_text')::text, content_text),
+    visibility   = COALESCE(sqlc.narg('visibility')::post_visibility, visibility)
+WHERE id = sqlc.arg('id') AND deleted_at IS NULL;
+
+-- name: SoftDeletePost :execrows
+-- 软删除：保留行以便审计与恢复，同时让所有读路径（都带 deleted_at IS NULL）立即不可见。
+-- 只改本行，不触碰 repost_of 指向的原帖——删掉一次转发不应影响被转发的原帖。
+UPDATE posts SET deleted_at = now()
+WHERE id = $1 AND deleted_at IS NULL;

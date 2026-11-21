@@ -22,6 +22,13 @@ const likeAggWindow = 10 * time.Minute
 // likeAggMaxActors 是 payload 中保留的最近点赞者数量，避免 payload 无限增长。
 const likeAggMaxActors = 3
 
+// docEditWindow 是文档编辑通知的聚合窗口。
+//
+// 比点赞窗口短：协同编辑时连续保存很常见，若用 10 分钟会把一整场协作压成一条，
+// 收件人会误以为文档只被改过一次。5 分钟既能压住「保存风暴」，
+// 又能在协作告一段落后给出新的提醒。
+const docEditWindow = 5 * time.Minute
+
 // emailDigestValues 是偏好里邮件摘要频率的合法取值。
 // 邮件通道本身属于 P2，这里只做存取与校验，不发信。
 var emailDigestValues = map[string]struct{}{
@@ -94,12 +101,45 @@ type Querier interface {
 type Service struct {
 	pool    *pgxpool.Pool
 	queries Querier
-	now     func() time.Time
+	// docEdits 负责 doc_edit 的窗口聚合。
+	//
+	// 单独抽成接口而不是塞进 Querier：Querier 被单测替身完整实现，
+	// 往里加方法会让所有既有替身编译失败；而聚合查询属于「可选增强」，
+	// 未注入时退化为直发通知，不影响其余类型。
+	docEdits docEditQuerier
+	now      func() time.Time
+}
+
+// docEditQuerier 是文档编辑聚合用到的最小查询集合。
+//
+// 单独抽成接口而不是塞进 Querier：Querier 被单测替身完整实现，
+// 往里加方法会让所有既有替身编译失败；而聚合查询属于「可选增强」，
+// 未注入时退化为直发通知，不影响其余类型。
+type docEditQuerier interface {
+	GetUnreadDocEditNotification(context.Context, db.GetUnreadDocEditNotificationParams) (db.Notification, error)
+	UpdateDocEditNotification(context.Context, db.UpdateDocEditNotificationParams) (db.Notification, error)
+}
+
+// dbDocEditQuerier 把生成查询桥接到 docEditQuerier。
+// 事务内用 db.New(tx) 构造，FOR UPDATE 因此能真正加锁。
+type dbDocEditQuerier struct{ queries *db.Queries }
+
+func (q dbDocEditQuerier) GetUnreadDocEditNotification(ctx context.Context, arg db.GetUnreadDocEditNotificationParams) (db.Notification, error) {
+	return q.queries.GetUnreadDocEditNotification(ctx, arg)
+}
+
+func (q dbDocEditQuerier) UpdateDocEditNotification(ctx context.Context, arg db.UpdateDocEditNotificationParams) (db.Notification, error) {
+	return q.queries.UpdateDocEditNotification(ctx, arg)
 }
 
 // NewService 构造服务。pool 为 nil 时读写都走注入的替身（单元测试场景）。
 func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, queries: db.New(pool), now: time.Now}
+	return &Service{
+		pool:     pool,
+		queries:  db.New(pool),
+		docEdits: dbDocEditQuerier{queries: db.New(pool)},
+		now:      time.Now,
+	}
 }
 
 // newServiceWithQuerier 用于测试注入替身。
@@ -108,16 +148,21 @@ func newServiceWithQuerier(queries Querier) *Service {
 }
 
 // withTx 在事务中执行 fn；没有连接池（单元测试替身）时直接执行。
-func (s *Service) withTx(ctx context.Context, fn func(Querier) error) error {
+//
+// fn 同时拿到事务内的 Querier 与 docEditQuerier：前者承载点赞聚合，
+// 后者承载 doc_edit 聚合，两者共用同一个事务，FOR UPDATE 才真正加锁。
+// 单测替身没有事务，两个参数都退回注入的替身（s.queries / s.docEdits）。
+func (s *Service) withTx(ctx context.Context, fn func(Querier, docEditQuerier) error) error {
 	if s.pool == nil {
-		return fn(s.queries)
+		return fn(s.queries, s.docEdits)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("开启事务失败: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := fn(db.New(tx)); err != nil {
+	q := db.New(tx)
+	if err := fn(q, dbDocEditQuerier{queries: q}); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -154,6 +199,9 @@ func (s *Service) Notify(ctx context.Context, input CreateInput) error {
 	if input.Type == string(db.NotifyTypeLikeAgg) {
 		return s.notifyLikeAgg(ctx, input, payload)
 	}
+	if input.Type == string(db.NotifyTypeDocEdit) {
+		return s.notifyDocEdit(ctx, input, payload)
+	}
 	_, err = s.queries.CreateNotification(ctx, db.CreateNotificationParams{
 		UserID:     uuidParam(input.UserID),
 		Type:       db.NotifyType(input.Type),
@@ -186,7 +234,7 @@ func (s *Service) notifyLikeAgg(ctx context.Context, input CreateInput, payload 
 		}
 		return nil
 	}
-	return s.withTx(ctx, func(q Querier) error {
+	return s.withTx(ctx, func(q Querier, _ docEditQuerier) error {
 		existing, err := q.GetUnreadLikeAggNotification(ctx, db.GetUnreadLikeAggNotificationParams{
 			UserID:     uuidParam(input.UserID),
 			TargetType: optionalString(input.TargetType),
@@ -219,6 +267,67 @@ func (s *Service) notifyLikeAgg(ctx context.Context, input CreateInput, payload 
 		})
 		if err != nil {
 			return fmt.Errorf("更新点赞聚合通知失败: %w", err)
+		}
+		return nil
+	})
+}
+
+// notifyDocEdit 实现文档编辑通知的 5 分钟窗口聚合。
+//
+// 与点赞聚合同构：窗口内已有未读的 doc_edit 通知就合并（刷新 payload 与
+// created_at），否则新建。payload 里的 count 记录窗口内的编辑次数，
+// actors 保留最近编辑者，供前端展示「张三等 3 人编辑过」。
+// 没有目标（缺文档 ID）时退化为普通直发，避免聚合键不完整。
+func (s *Service) notifyDocEdit(ctx context.Context, input CreateInput, payload []byte) error {
+	if input.TargetType == "" || input.TargetID == uuid.Nil || s.docEdits == nil {
+		_, err := s.queries.CreateNotification(ctx, db.CreateNotificationParams{
+			UserID:     uuidParam(input.UserID),
+			Type:       db.NotifyTypeDocEdit,
+			ActorID:    uuidParam(input.ActorID),
+			TargetType: optionalString(input.TargetType),
+			TargetID:   uuidParam(input.TargetID),
+			Payload:    seedLikeAggPayload(payload, input.ActorID, likeAggMaxActors),
+		})
+		if err != nil {
+			return fmt.Errorf("创建通知失败: %w", err)
+		}
+		return nil
+	}
+	return s.withTx(ctx, func(q Querier, docEdits docEditQuerier) error {
+		existing, err := docEdits.GetUnreadDocEditNotification(ctx, db.GetUnreadDocEditNotificationParams{
+			UserID:     uuidParam(input.UserID),
+			TargetType: optionalString(input.TargetType),
+			TargetID:   uuidParam(input.TargetID),
+			CreatedAt:  pgtype.Timestamptz{Time: s.now().UTC().Add(-docEditWindow), Valid: true},
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			// 新建与更新都走同一事务：FOR UPDATE 锁住的是「已有通知」，
+			// 没有已有通知时靠 type + 目标的唯一语义由应用层保证（同一次保存只调一次）。
+			_, err := q.CreateNotification(ctx, db.CreateNotificationParams{
+				UserID:     uuidParam(input.UserID),
+				Type:       db.NotifyTypeDocEdit,
+				ActorID:    uuidParam(input.ActorID),
+				TargetType: optionalString(input.TargetType),
+				TargetID:   uuidParam(input.TargetID),
+				Payload:    seedLikeAggPayload(payload, input.ActorID, likeAggMaxActors),
+			})
+			if err != nil {
+				return fmt.Errorf("创建通知失败: %w", err)
+			}
+			return nil
+		case err != nil:
+			return fmt.Errorf("查询文档编辑聚合通知失败: %w", err)
+		}
+		merged := mergeLikeAggPayload(existing.Payload, input.ActorID, likeAggMaxActors)
+		_, err = docEdits.UpdateDocEditNotification(ctx, db.UpdateDocEditNotificationParams{
+			ID:      existing.ID,
+			Payload: merged,
+			ActorID: uuidParam(input.ActorID),
+			UserID:  uuidParam(input.UserID),
+		})
+		if err != nil {
+			return fmt.Errorf("更新文档编辑聚合通知失败: %w", err)
 		}
 		return nil
 	})

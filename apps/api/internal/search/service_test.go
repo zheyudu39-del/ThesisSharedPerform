@@ -254,6 +254,62 @@ func TestIndex_PassesThrough(t *testing.T) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* PDF 全文索引（S-04）                                                        */
+/* -------------------------------------------------------------------------- */
+
+func TestIndexPaperFullText_MergesAbstractAndPDF(t *testing.T) {
+	stub := &stubQuerier{}
+	svc := NewServiceWithQuerier(stub)
+	id := uuid.New()
+
+	if err := svc.IndexPaperFullText(context.Background(), id, "标题", "摘要内容", "PDF 全文内容"); err != nil {
+		t.Fatalf("意外错误: %v", err)
+	}
+	if stub.upserts != 1 || stub.lastEntityType != EntityPaper {
+		t.Fatalf("应写入一次论文索引, got %d 次, 类型 %q", stub.upserts, stub.lastEntityType)
+	}
+	// 摘要必须排在全文之前：阅读顺序一致，且 ts_rank 会优先命中靠前内容。
+	if !strings.Contains(stub.lastBody, "摘要内容") || !strings.Contains(stub.lastBody, "PDF 全文内容") {
+		t.Fatalf("索引正文缺少内容: %q", stub.lastBody)
+	}
+	if strings.Index(stub.lastBody, "摘要内容") > strings.Index(stub.lastBody, "PDF 全文内容") {
+		t.Fatalf("摘要应排在全文之前: %q", stub.lastBody)
+	}
+}
+
+func TestIndexPaperFullText_NoPDFTextStillIndexesAbstract(t *testing.T) {
+	stub := &stubQuerier{}
+	svc := NewServiceWithQuerier(stub)
+
+	// 扫描件提取不到文本时不应报错，摘要照常可检索。
+	if err := svc.IndexPaperFullText(context.Background(), uuid.New(), "标题", "只有摘要", ""); err != nil {
+		t.Fatalf("无文本层不应报错: %v", err)
+	}
+	if stub.upserts != 1 {
+		t.Fatalf("应写入索引, got %d", stub.upserts)
+	}
+}
+
+func TestIndexFileText_EmptyTextSkips(t *testing.T) {
+	stub := &stubQuerier{}
+	svc := NewServiceWithQuerier(stub)
+
+	if err := svc.IndexFileText(context.Background(), uuid.New(), "a.pdf", "   "); err != nil {
+		t.Fatalf("空文本应静默跳过: %v", err)
+	}
+	if stub.upserts != 0 {
+		t.Fatal("空文本不应写入索引")
+	}
+}
+
+func TestIndexFileText_RejectsNilID(t *testing.T) {
+	svc := NewServiceWithQuerier(&stubQuerier{})
+	if err := svc.IndexFileText(context.Background(), uuid.Nil, "a.pdf", "正文"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("空 fileId 应返回 ErrValidation, got %v", err)
+	}
+}
+
+/* -------------------------------------------------------------------------- */
 /* 测试替身                                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -261,12 +317,20 @@ type stubQuerier struct {
 	called         bool
 	upserts        int
 	lastEntityType string
+	lastTitle      string
+	lastBody       string
 }
 
 func (s *stubQuerier) UpsertSearchDocument(_ context.Context, arg db.UpsertSearchDocumentParams) error {
 	s.called = true
 	s.upserts++
 	s.lastEntityType = arg.EntityType
+	if arg.Title != nil {
+		s.lastTitle = *arg.Title
+	}
+	if arg.Body != nil {
+		s.lastBody = *arg.Body
+	}
 	return nil
 }
 

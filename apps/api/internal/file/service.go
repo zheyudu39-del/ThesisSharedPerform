@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thesis-shared/api/internal/db"
+	"github.com/thesis-shared/api/internal/search"
 )
 
 var (
@@ -58,6 +59,17 @@ type ObjectStore interface {
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
 }
 
+// TextIndexer 把「文件文本层」接到检索索引上。
+//
+// 单独声明接口而不是直接 import search：依赖方向始终是「业务包 ← server → search」，
+// 与 content / group 的 Indexer 写法一致。未注入时文本层照常落库，只是不建索引。
+type TextIndexer interface {
+	// IndexFileText 为尚未关联论文的文件建索引（保留文本，暂不参与检索）。
+	IndexFileText(ctx context.Context, fileID uuid.UUID, filename, text string) error
+	// IndexPaperFullText 把文本层并入论文索引（PRD S-04）。
+	IndexPaperFullText(ctx context.Context, paperID uuid.UUID, title, abstract, text string) error
+}
+
 // Querier 限定文件服务使用的查询，便于注入替身。
 type Querier interface {
 	CreateFile(context.Context, db.CreateFileParams) (db.File, error)
@@ -70,6 +82,8 @@ type Querier interface {
 	ListFilePages(context.Context, db.ListFilePagesParams) ([]db.FilePage, error)
 	CountFilePages(context.Context, pgtype.UUID) (int64, error)
 	UpdateFileStatus(context.Context, db.UpdateFileStatusParams) (db.File, error)
+	SetFileTextLayerKey(context.Context, db.SetFileTextLayerKeyParams) error
+	GetPaperForFile(context.Context, pgtype.UUID) (db.GetPaperForFileRow, error)
 }
 
 // File 是对外的文件 DTO，字段与前端契约严格一致。
@@ -121,6 +135,7 @@ type Service struct {
 	pool    *pgxpool.Pool
 	queries Querier
 	store   ObjectStore
+	indexer TextIndexer
 	sem     chan struct{}
 	now     func() time.Time
 }
@@ -145,6 +160,9 @@ func NewServiceWithDeps(q Querier, store ObjectStore) *Service {
 		now:     time.Now,
 	}
 }
+
+// SetTextIndexer 注入文本层索引实现；不注入时只落文本层、不建索引。
+func (s *Service) SetTextIndexer(indexer TextIndexer) { s.indexer = indexer }
 
 // Presign 校验上传意图并生成预签名 PUT 地址。
 func (s *Service) Presign(ctx context.Context, userID uuid.UUID, input PresignInput) (PresignResult, error) {
@@ -431,6 +449,11 @@ func (s *Service) transcode(ctx context.Context, fileID uuid.UUID, storageKey st
 		return err
 	}
 
+	// 文本层与页图互不依赖：提取失败（扫描件、滤镜不支持）只影响检索，
+	// 不能让整份文件变成 failed，因此这里吞掉错误、只记日志。
+	// 放在 MarkFileReady 之前：就绪后前端可能立刻检索，文本层应先就位。
+	s.extractTextLayer(ctx, fileID, pdfPath)
+
 	var coverKey string
 	for _, p := range pages {
 		key := PageImageKey(fileID, p.PageNo)
@@ -461,6 +484,98 @@ func (s *Service) transcode(ctx context.Context, fileID uuid.UUID, storageKey st
 		return fmt.Errorf("更新就绪状态: %w", err)
 	}
 	return nil
+}
+
+// TextLayerKey 返回文本层的对象存储 key：text-layer/{fileId}.txt。
+// 与 files.text_layer_key 的取值约定一致。
+func TextLayerKey(fileID uuid.UUID) string {
+	return fmt.Sprintf("text-layer/%s.txt", fileID)
+}
+
+// extractTextLayer 从 PDF 提取文本层，写入对象存储与 files.text_layer_key，
+// 并把文本接入检索索引（PRD S-04）。
+//
+// 失败语义：文本层是「增强项」，不是文件的必需产物。扫描件本来就提取不到文本，
+// 因此这里只记日志、不返回错误，绝不把文件状态改成 failed。
+func (s *Service) extractTextLayer(ctx context.Context, fileID uuid.UUID, pdfPath string) {
+	f, err := os.Open(pdfPath)
+	if err != nil {
+		slog.Warn("打开 PDF 提取文本层失败", "err", err, "fileId", fileID)
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	text, err := search.ExtractText(f)
+	if err != nil {
+		slog.Warn("PDF 文本层提取失败", "err", err, "fileId", fileID)
+		return
+	}
+	if strings.TrimSpace(text) == "" {
+		// 扫描版 PDF：没有文本层，索引也无从谈起。
+		slog.Info("PDF 没有可提取的文本层（可能是扫描件）", "fileId", fileID)
+		return
+	}
+
+	key := TextLayerKey(fileID)
+	data := []byte(text)
+	if err := s.store.Put(ctx, key, strings.NewReader(text), int64(len(data)), "text/plain; charset=utf-8"); err != nil {
+		slog.Warn("上传文本层失败", "err", err, "fileId", fileID)
+		return
+	}
+	if err := s.setTextLayerKey(ctx, fileID, key); err != nil {
+		slog.Warn("记录文本层 key 失败", "err", err, "fileId", fileID)
+	}
+
+	s.indexTextLayer(ctx, fileID, text)
+}
+
+// indexTextLayer 把文本层接到检索：论文关联的 PDF 并入论文索引，
+// 未关联的按文件单独保留（见 search.IndexFileText 的说明）。
+func (s *Service) indexTextLayer(ctx context.Context, fileID uuid.UUID, text string) {
+	if s.indexer == nil {
+		return
+	}
+	paperID, title, abstract, ok, err := s.paperForFile(ctx, fileID)
+	if err != nil {
+		slog.Warn("查询文件关联论文失败", "err", err, "fileId", fileID)
+	}
+	if ok {
+		if err := s.indexer.IndexPaperFullText(ctx, paperID, title, abstract, text); err != nil {
+			slog.Warn("索引论文全文失败", "err", err, "fileId", fileID, "paperId", paperID)
+		}
+		return
+	}
+	if err := s.indexer.IndexFileText(ctx, fileID, "", text); err != nil {
+		slog.Warn("索引文件文本层失败", "err", err, "fileId", fileID)
+	}
+}
+
+// setTextLayerKey 把文本层 key 写回 files。
+func (s *Service) setTextLayerKey(ctx context.Context, fileID uuid.UUID, key string) error {
+	if err := s.queries.SetFileTextLayerKey(ctx, db.SetFileTextLayerKeyParams{
+		ID:           uuidParam(fileID),
+		TextLayerKey: &key,
+	}); err != nil {
+		return fmt.Errorf("更新文本层 key: %w", err)
+	}
+	return nil
+}
+
+// paperForFile 查出该文件被哪篇论文引用（papers.pdf_file_id）。
+// 返回 ok=false 表示没有论文引用它。
+func (s *Service) paperForFile(ctx context.Context, fileID uuid.UUID) (uuid.UUID, string, string, bool, error) {
+	row, err := s.queries.GetPaperForFile(ctx, uuidParam(fileID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, "", "", false, nil
+	}
+	if err != nil {
+		return uuid.Nil, "", "", false, err
+	}
+	abstract := ""
+	if row.Abstract != nil {
+		abstract = *row.Abstract
+	}
+	return row.PaperID.Bytes, row.Title, abstract, true, nil
 }
 
 func (s *Service) download(ctx context.Context, key, dest string) error {

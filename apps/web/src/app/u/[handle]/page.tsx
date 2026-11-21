@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { BlockButton } from "@/components/BlockButton";
 import { FollowerCount, ProfileFollowButton } from "@/components/ProfileInteractive";
 import { SealBadge } from "@/components/SealBadge";
 import { SiteHeader } from "@/components/SiteHeader";
@@ -107,12 +108,17 @@ export default async function ProfilePage({ params }: PageProps) {
                 <p className="mt-1 font-mono text-[0.8rem] text-ink-3">@{user.handle}</p>
               </div>
 
-              <ProfileFollowButton
-                handle={user.handle}
-                userId={user.id}
-                initialFollowing={profile.following}
-                followingKnown={profile.followingKnown}
-              />
+              <div className="flex flex-wrap items-center gap-2">
+                <ProfileFollowButton
+                  handle={user.handle}
+                  userId={user.id}
+                  initialFollowing={profile.following}
+                  followingKnown={profile.followingKnown}
+                />
+                {/* 屏蔽只影响我的信息流，主页仍可访问（PRD F-06）。
+                    isSelf 由组件用会话 handle 自行判定，这里不必传。 */}
+                <BlockButton handle={user.handle} />
+              </div>
             </div>
 
             {user.institution && (

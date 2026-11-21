@@ -403,6 +403,33 @@ func (q *Queries) GetGroupMemberRole(ctx context.Context, arg GetGroupMemberRole
 	return role, err
 }
 
+const getSnapshot = `-- name: GetSnapshot :one
+SELECT doc_id, version, storage_key, size_bytes, label, created_by, created_at FROM doc_snapshots WHERE doc_id = $1 AND version = $2
+`
+
+type GetSnapshotParams struct {
+	DocID   pgtype.UUID `json:"doc_id"`
+	Version int32       `json:"version"`
+}
+
+// 读取单个版本的快照记录，供「下载快照」与「回滚到该版本」使用。
+// 回滚不会复制二进制：新记录直接引用旧记录的 storage_key（见 doc.RestoreSnapshot）。
+// 因此清理历史快照前必须确认没有其他记录仍在引用同一个 storage_key。
+func (q *Queries) GetSnapshot(ctx context.Context, arg GetSnapshotParams) (DocSnapshot, error) {
+	row := q.db.QueryRow(ctx, getSnapshot, arg.DocID, arg.Version)
+	var i DocSnapshot
+	err := row.Scan(
+		&i.DocID,
+		&i.Version,
+		&i.StorageKey,
+		&i.SizeBytes,
+		&i.Label,
+		&i.CreatedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertSnapshot = `-- name: InsertSnapshot :one
 INSERT INTO doc_snapshots (doc_id, version, storage_key, size_bytes, label, created_by)
 VALUES ($1, $2, $3, $4, $5, $6)
