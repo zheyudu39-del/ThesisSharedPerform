@@ -2,6 +2,7 @@ package paper
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -27,6 +28,15 @@ type fakeQuerier struct {
 
 	setCalls int
 	lastSet  db.SetPaperPDFFileParams
+
+	// 手动补录（P-04）
+	createCalls int
+	lastCreate  db.CreatePaperParams
+	createErr   error
+	doiErr      error
+	arxivErr    error
+	dedupeErr   error
+	dedupePaper db.Paper
 }
 
 func (f *fakeQuerier) GetPaperByID(context.Context, pgtype.UUID) (db.Paper, error) {
@@ -179,5 +189,157 @@ func TestSetPDFFilePaperNotFound(t *testing.T) {
 
 	if _, err := NewServiceWithQuerier(q, nil).SetPDFFile(context.Background(), userID, paperID, nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+/* -------------------------------------------------------------------------- */
+/* 手动补录（P-04）                                                            */
+/* -------------------------------------------------------------------------- */
+
+func (f *fakeQuerier) CreatePaper(_ context.Context, arg db.CreatePaperParams) (db.Paper, error) {
+	f.createCalls++
+	f.lastCreate = arg
+	if f.createErr != nil {
+		return db.Paper{}, f.createErr
+	}
+	return db.Paper{
+		ID: uuidOf(uuid.Must(uuid.NewV7())), Title: arg.Title, Authors: arg.Authors,
+		Doi: arg.Doi, ArxivID: arg.ArxivID, MetaSource: arg.MetaSource,
+	}, nil
+}
+
+func (f *fakeQuerier) GetPaperByDOI(context.Context, *string) (db.Paper, error) {
+	if f.doiErr != nil {
+		return db.Paper{}, f.doiErr
+	}
+	return f.paper, nil
+}
+
+func (f *fakeQuerier) GetPaperByArxivID(context.Context, *string) (db.Paper, error) {
+	if f.arxivErr != nil {
+		return db.Paper{}, f.arxivErr
+	}
+	return f.paper, nil
+}
+
+func (f *fakeQuerier) GetPaperByDedupeHash(context.Context, *string) (db.Paper, error) {
+	if f.dedupeErr != nil {
+		return db.Paper{}, f.dedupeErr
+	}
+	return f.dedupePaper, nil
+}
+
+func TestCreateManualRequiresTitle(t *testing.T) {
+	q := &fakeQuerier{}
+	_, err := NewServiceWithQuerier(q, nil).CreateManual(context.Background(), uuid.Must(uuid.NewV7()), CreateManualInput{
+		Title:   "   ",
+		Authors: []Author{{Name: "张三"}},
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("err = %v, want ErrInvalidInput", err)
+	}
+	if q.createCalls != 0 {
+		t.Fatal("校验失败时不应写库")
+	}
+}
+
+func TestCreateManualRequiresAuthor(t *testing.T) {
+	q := &fakeQuerier{}
+	for _, authors := range [][]Author{
+		nil,
+		{{Name: ""}},
+		{{Name: "   "}},
+	} {
+		_, err := NewServiceWithQuerier(q, nil).CreateManual(context.Background(), uuid.Must(uuid.NewV7()), CreateManualInput{
+			Title: "标题", Authors: authors,
+		})
+		if !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("authors=%v err = %v, want ErrInvalidInput", authors, err)
+		}
+	}
+}
+
+// TestCreateManualWritesManualSource 验证来源被正确标记，
+// 运营才能区分「抓来的」与「人填的」。
+func TestCreateManualWritesManualSource(t *testing.T) {
+	q := &fakeQuerier{doiErr: pgx.ErrNoRows, arxivErr: pgx.ErrNoRows, dedupeErr: pgx.ErrNoRows}
+	got, err := NewServiceWithQuerier(q, nil).CreateManual(context.Background(), uuid.Must(uuid.NewV7()), CreateManualInput{
+		Title:   "无 DOI 的专著",
+		Authors: []Author{{Name: "张三"}, {Name: "  "}}, // 空白作者被丢弃
+	})
+	if err != nil {
+		t.Fatalf("CreateManual: %v", err)
+	}
+	if got.Existing {
+		t.Fatal("应当是新建")
+	}
+	if q.lastCreate.MetaSource == nil || *q.lastCreate.MetaSource != string(SourceManual) {
+		t.Fatalf("metaSource = %v, want manual", q.lastCreate.MetaSource)
+	}
+	var authors []Author
+	if err := json.Unmarshal(q.lastCreate.Authors, &authors); err != nil {
+		t.Fatalf("解析作者: %v", err)
+	}
+	if len(authors) != 1 || authors[0].Name != "张三" {
+		t.Fatalf("空白作者应被丢弃，实际 %+v", authors)
+	}
+}
+
+// TestCreateManualNormalizesIdentifiers 验证 DOI / arXiv 会被规范化，
+// 否则「粘贴整条链接」与「裸编号」会被当成两篇不同论文。
+func TestCreateManualNormalizesIdentifiers(t *testing.T) {
+	q := &fakeQuerier{doiErr: pgx.ErrNoRows, arxivErr: pgx.ErrNoRows}
+	_, err := NewServiceWithQuerier(q, nil).CreateManual(context.Background(), uuid.Must(uuid.NewV7()), CreateManualInput{
+		Title:   "带标识的论文",
+		Authors: []Author{{Name: "张三"}},
+		DOI:     "https://doi.org/10.1145/ABC123",
+		ArxivID: "https://arxiv.org/abs/2405.13412v3",
+	})
+	if err != nil {
+		t.Fatalf("CreateManual: %v", err)
+	}
+	if q.lastCreate.Doi == nil || *q.lastCreate.Doi != "10.1145/abc123" {
+		t.Fatalf("DOI 未规范化：%v", q.lastCreate.Doi)
+	}
+	if q.lastCreate.ArxivID == nil || *q.lastCreate.ArxivID != "2405.13412" {
+		t.Fatalf("arXiv 未规范化：%v", q.lastCreate.ArxivID)
+	}
+}
+
+// TestCreateManualDedupesWithoutIdentifiers 验证无标识的论文按软哈希去重。
+func TestCreateManualDedupesWithoutIdentifiers(t *testing.T) {
+	existingID := uuid.Must(uuid.NewV7())
+	q := &fakeQuerier{
+		dedupePaper: db.Paper{ID: uuidOf(existingID), Title: "已有论文"},
+	}
+	got, err := NewServiceWithQuerier(q, nil).CreateManual(context.Background(), uuid.Must(uuid.NewV7()), CreateManualInput{
+		Title:         "已有论文",
+		Authors:       []Author{{Name: "张三"}},
+		PublishedYear: 2020,
+	})
+	if err != nil {
+		t.Fatalf("CreateManual: %v", err)
+	}
+	if !got.Existing || got.Paper.ID != existingID {
+		t.Fatalf("应命中已有记录，实际 existing=%v id=%v", got.Existing, got.Paper.ID)
+	}
+	if q.createCalls != 0 {
+		t.Fatal("命中已有记录时不应写库")
+	}
+}
+
+// TestNormalizeArxiv 验证各种写法的 arXiv 编号归一到裸编号。
+func TestNormalizeArxiv(t *testing.T) {
+	tests := map[string]string{
+		"2405.13412":                             "2405.13412",
+		"2405.13412v3":                           "2405.13412",
+		"https://arxiv.org/abs/2405.13412":       "2405.13412",
+		"https://arxiv.org/pdf/2405.13412v2.pdf": "2405.13412",
+		"arxiv:2405.13412":                       "2405.13412",
+	}
+	for input, want := range tests {
+		if got := normalizeArxiv(input); got != want {
+			t.Fatalf("normalizeArxiv(%q) = %q, want %q", input, got, want)
+		}
 	}
 }

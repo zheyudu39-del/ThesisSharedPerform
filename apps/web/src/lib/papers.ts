@@ -72,6 +72,40 @@ export async function resolvePaper(input: string): Promise<ResolveResult> {
   return body as ResolveResult;
 }
 
+/** 手动补录入参（PRD P-04）。标题与至少一位作者必填。 */
+export type CreateManualPaperInput = {
+  title: string;
+  authors: PaperAuthor[];
+  abstract?: string;
+  venue?: string;
+  publishedYear?: number;
+  doi?: string;
+  arxivId?: string;
+};
+
+/**
+ * 手动补录论文（无 DOI / arXiv 编号的场景）。
+ *
+ * 不访问任何外部源，元数据完全来自用户。服务端按 (标题, 第一作者, 年份)
+ * 做软去重，重复补录同一篇会返回已有记录（existing=true）。
+ */
+export async function createManualPaper(
+  input: CreateManualPaperInput,
+): Promise<ResolveResult> {
+  const body = await apiFetch("/papers", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    typeof (body as Record<string, unknown>).paper !== "object"
+  ) {
+    throw new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);
+  }
+  return body as ResolveResult;
+}
+
 export type PaperList = {
   papers: PaperDTO[];
   total: number;

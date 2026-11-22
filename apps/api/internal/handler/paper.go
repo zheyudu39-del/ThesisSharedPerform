@@ -95,6 +95,70 @@ func (h *PaperHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"paper": p})
 }
 
+type createManualRequest struct {
+	Title         string `json:"title"`
+	Authors       []struct {
+		Name        string `json:"name"`
+		Affiliation string `json:"affiliation"`
+		ORCID       string `json:"orcid"`
+	} `json:"authors"`
+	Abstract      string `json:"abstract"`
+	Venue         string `json:"venue"`
+	PublishedYear int    `json:"publishedYear"`
+	DOI           string `json:"doi"`
+	ArxivID       string `json:"arxivId"`
+}
+
+// CreateManual 处理 POST /api/v1/papers，手动补录论文（PRD P-04）。
+//
+// 适用于没有 DOI / arXiv 编号的论文：专著、技术报告、内部文档。
+// 必填标题与至少一位作者，其余字段可选。
+func (h *PaperHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+		return
+	}
+
+	var req createManualRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+
+	authors := make([]paper.Author, 0, len(req.Authors))
+	for _, a := range req.Authors {
+		authors = append(authors, paper.Author{
+			Name: a.Name, Affiliation: a.Affiliation, ORCID: a.ORCID,
+		})
+	}
+
+	result, err := h.svc.CreateManual(r.Context(), userID, paper.CreateManualInput{
+		Title:         req.Title,
+		Authors:       authors,
+		Abstract:      req.Abstract,
+		Venue:         req.Venue,
+		PublishedYear: req.PublishedYear,
+		DOI:           req.DOI,
+		ArxivID:       req.ArxivID,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, paper.ErrInvalidInput):
+			writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		default:
+			slog.Error("手动补录论文失败", "err", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "服务器内部错误")
+		}
+		return
+	}
+
+	status := http.StatusOK
+	if !result.Existing {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, result)
+}
+
 // SetPDFFile 处理 PATCH /api/v1/papers/{id}/pdf。
 //
 // 请求体 {"fileId": "..."}；fileId 为 null 或空串表示卸载全文。

@@ -196,6 +196,9 @@ func New(d Deps) *http.Server {
 
 				// 论文解析：识别 DOI / arXiv 并抓取元数据，需登录（避免被匿名刷外部 API）。
 				r.Post("/papers/resolve", papers.Resolve)
+				// 手动补录：没有 DOI / arXiv 编号的论文（P-04）。
+				// 与解析分开是因为它完全不访问外部源，元数据全由用户填写。
+				r.Post("/papers", papers.CreateManual)
 				// 论文全文挂载：上传只写 files 表，关联论文靠这个接口，
 				// 否则刷新后 pdfFileId 丢失、论文页又变回「还没有全文」。
 				r.Patch("/papers/{id}/pdf", papers.SetPDFFile)

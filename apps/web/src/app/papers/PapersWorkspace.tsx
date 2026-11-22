@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { RequireAuth } from "@/components/RequireAuth";
+import { ManualPaperForm } from "@/components/ManualPaperForm";
 import { AuthError } from "@/lib/auth";
 import { listPapers, resolvePaper, type PaperDTO, type ResolveResult } from "@/lib/papers";
 
@@ -127,6 +128,14 @@ function PapersPanel() {
       )}
 
       {result && <ResolveCard result={result} />}
+
+      <ManualPaperForm
+        onCreated={(r) => {
+          setResult(r);
+          // 新建成功后刷新列表，让刚补录的论文立刻出现在下方。
+          void refreshList();
+        }}
+      />
 
       {/* 论文列表 */}
       <section className="mt-10">

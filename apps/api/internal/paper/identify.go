@@ -97,6 +97,35 @@ func parseArxivPath(path string) (string, bool) {
 	return "", false
 }
 
+// normalizeArxiv 统一 arXiv 编号：去掉 abs/pdf URL 前缀与版本号后缀。
+//
+// 手动补录时用户可能粘贴整条链接或带 v3 的编号，而库里的 arxiv_id
+// 按「裸编号」存——不统一就查不到已有的那篇，会重复创建。
+func normalizeArxiv(raw string) string {
+	s := strings.TrimSpace(raw)
+	lower := strings.ToLower(s)
+	for _, prefix := range []string{
+		"https://arxiv.org/abs/", "http://arxiv.org/abs/",
+		"https://arxiv.org/pdf/", "http://arxiv.org/pdf/",
+		"arxiv:", "arxiv ",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			s = s[len(prefix):]
+			lower = lower[len(prefix):]
+			break
+		}
+	}
+	s = strings.TrimSuffix(s, ".pdf")
+	// 去掉版本号后缀：2405.13412v3 → 2405.13412
+	if m := arxivVersionSuffix.FindStringSubmatch(s); m != nil {
+		s = m[1]
+	}
+	return strings.TrimSpace(s)
+}
+
+// arxivVersionSuffix 匹配末尾的 vN 并捕获前面的编号。
+var arxivVersionSuffix = regexp.MustCompile(`^(.+?)v\d+$`)
+
 // normalizeDOI 统一 DOI 形式：去掉 https://doi.org/ 等前缀，转小写。
 func normalizeDOI(doi string) string {
 	d := strings.TrimSpace(doi)

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -122,6 +123,124 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (Paper, error) {
 		return Paper{}, err
 	}
 	return toPaper(record), nil
+}
+
+// CreateManualInput 是手动补录论文的入参（PRD P-04）。
+//
+// 适用场景：没有 DOI / arXiv 编号的论文——专著、技术报告、内部文档、
+// 尚未上线的预印本。PRD 要求「必填标题 + 至少一位作者」。
+type CreateManualInput struct {
+	Title         string
+	Authors       []Author
+	Abstract      string
+	Venue         string
+	PublishedYear int
+	DOI           string
+	ArxivID       string
+}
+
+// CreateManual 手动创建一篇论文。
+//
+// 与 Resolve 的区别：不访问任何外部源，元数据完全来自用户。
+// meta_source 记为 "manual"，便于运营区分「抓来的」和「人填的」。
+//
+// 去重：填了 DOI / arXiv 时先按强标识查重；都没填则按
+// (标题归一化, 第一作者, 年份) 算软去重哈希，命中已有记录直接返回，
+// 避免同一篇论文被反复补录成多条。
+func (s *Service) CreateManual(ctx context.Context, createdBy uuid.UUID, input CreateManualInput) (ResolveResult, error) {
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		return ResolveResult{}, fmt.Errorf("%w: 标题不能为空", ErrInvalidInput)
+	}
+	if utf8.RuneCountInString(title) > 512 {
+		return ResolveResult{}, fmt.Errorf("%w: 标题不能超过 512 个字符", ErrInvalidInput)
+	}
+
+	// 作者：去掉空白项，至少留一位。
+	authors := make([]Author, 0, len(input.Authors))
+	for _, a := range input.Authors {
+		name := strings.TrimSpace(a.Name)
+		if name == "" {
+			continue
+		}
+		authors = append(authors, Author{
+			Name:        name,
+			Affiliation: strings.TrimSpace(a.Affiliation),
+			ORCID:       strings.TrimSpace(a.ORCID),
+		})
+	}
+	if len(authors) == 0 {
+		return ResolveResult{}, fmt.Errorf("%w: 至少需要一位作者", ErrInvalidInput)
+	}
+	if len(authors) > 50 {
+		return ResolveResult{}, fmt.Errorf("%w: 作者不能超过 50 位", ErrInvalidInput)
+	}
+
+	meta := Metadata{
+		Title:         title,
+		Authors:       authors,
+		Abstract:      strings.TrimSpace(input.Abstract),
+		Venue:         strings.TrimSpace(input.Venue),
+		PublishedYear: input.PublishedYear,
+		DOI:           normalizeDOI(strings.TrimSpace(input.DOI)),
+		ArxivID:       normalizeArxiv(strings.TrimSpace(input.ArxivID)),
+		Source:        SourceManual,
+	}
+
+	// 有强标识时先按它查重，命中直接返回。
+	if meta.DOI != "" || meta.ArxivID != "" {
+		if existing, found, err := s.findExisting(ctx, Identifier{
+			Kind:  pickKind(meta.DOI, meta.ArxivID),
+			Value: pickValue(meta.DOI, meta.ArxivID),
+		}); err != nil {
+			return ResolveResult{}, err
+		} else if found {
+			return ResolveResult{Paper: toPaper(existing), Existing: true}, nil
+		}
+	} else {
+		// 无强标识：按软去重哈希查重。
+		hash := dedupeHash(meta)
+		if existing, err := s.querier.GetPaperByDedupeHash(ctx, &hash); err == nil {
+			return ResolveResult{Paper: toPaper(existing), Existing: true}, nil
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return ResolveResult{}, err
+		}
+	}
+
+	created, err := s.insert(ctx, meta, createdBy)
+	if err != nil {
+		if isUniqueViolation(err) {
+			// 并发补录同一篇：重新查一次，返回已有记录。
+			if meta.DOI != "" || meta.ArxivID != "" {
+				if existing, found, findErr := s.findExisting(ctx, Identifier{
+					Kind:  pickKind(meta.DOI, meta.ArxivID),
+					Value: pickValue(meta.DOI, meta.ArxivID),
+				}); findErr == nil && found {
+					return ResolveResult{Paper: toPaper(existing), Existing: true}, nil
+				}
+			} else if h := dedupeHash(meta); h != "" {
+				if existing, findErr := s.querier.GetPaperByDedupeHash(ctx, &h); findErr == nil {
+					return ResolveResult{Paper: toPaper(existing), Existing: true}, nil
+				}
+			}
+		}
+		return ResolveResult{}, err
+	}
+	return ResolveResult{Paper: toPaper(created), Existing: false}, nil
+}
+
+func pickKind(doi, arxiv string) Source {
+	if doi != "" {
+		return SourceDOI
+	}
+	return SourceArxiv
+}
+
+func pickValue(doi, arxiv string) string {
+	if doi != "" {
+		return doi
+	}
+	return arxiv
 }
 
 // SetPDFFile 把一份已上传的文件设为这篇论文的全文（papers.pdf_file_id）。
