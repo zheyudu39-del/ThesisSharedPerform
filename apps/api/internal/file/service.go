@@ -97,6 +97,10 @@ type File struct {
 	PageCount    int       `json:"pageCount"`
 	CreatedAt    time.Time `json:"createdAt"`
 	CoverURL     *string   `json:"coverUrl"`
+	// ErrorReason 在 status=failed/rejected 时说明原因（转码超时、未装
+	// LibreOffice、文件损坏等）。不返回的话用户只能看到一个失败状态，
+	// 无法判断是自己的文件有问题还是部署缺依赖。
+	ErrorReason *string `json:"errorReason"`
 }
 
 // Page 是单页页图 DTO。
@@ -274,9 +278,10 @@ func (s *Service) Complete(ctx context.Context, userID, fileID uuid.UUID, sizeBy
 		record.SizeBytes = actual
 	}
 
-	// 非 PDF 暂无转码流水线（Office 需 LibreOffice，M1 未接入）：
-	// 直接置 ready，前端按类型降级为下载查看。
-	if record.Kind != db.FileKindPdf {
+	// Office 文档与 PDF 都需要页图才能预览，一起进转码流水线；
+	// Office 多一步 LibreOffice 转 PDF（见 office.go）。
+	// 图片、Markdown 等无需转码，直接置 ready 由前端按类型展示。
+	if !needsTranscode(string(record.Kind)) {
 		ready, err := s.queries.UpdateFileStatus(ctx, db.UpdateFileStatusParams{
 			ID:     uuidParam(fileID),
 			Status: db.FileStatusReady,
@@ -296,7 +301,7 @@ func (s *Service) Complete(ctx context.Context, userID, fileID uuid.UUID, sizeBy
 		return File{}, fmt.Errorf("更新文件状态: %w", err)
 	}
 
-	s.startTranscode(fileID, record.StorageKey)
+	s.startTranscode(fileID, record.StorageKey, string(record.Kind))
 	return s.toFile(ctx, transcoding), nil
 }
 
@@ -389,6 +394,7 @@ func (s *Service) toFile(ctx context.Context, record db.File) File {
 		SizeBytes:    record.SizeBytes,
 		Status:       string(record.Status),
 		CreatedAt:    record.CreatedAt.Time,
+		ErrorReason:  record.ErrorReason,
 	}
 	if record.PageCount != nil {
 		out.PageCount = int(*record.PageCount)
@@ -410,7 +416,7 @@ func (s *Service) presignGet(ctx context.Context, key string) (string, error) {
 
 // startTranscode 在后台转码。必须使用 context.Background()：
 // 请求 context 在 Complete 返回后即被取消，会让下载与上传全部中断。
-func (s *Service) startTranscode(fileID uuid.UUID, storageKey string) {
+func (s *Service) startTranscode(fileID uuid.UUID, storageKey, kind string) {
 	go func() {
 		s.sem <- struct{}{}
 		defer func() { <-s.sem }()
@@ -418,8 +424,8 @@ func (s *Service) startTranscode(fileID uuid.UUID, storageKey string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 
-		if err := s.transcode(ctx, fileID, storageKey); err != nil {
-			slog.Error("PDF 转码失败", "err", err, "fileId", fileID)
+		if err := s.transcode(ctx, fileID, storageKey, kind); err != nil {
+			slog.Error("文件转码失败", "err", err, "fileId", fileID, "kind", kind)
 			reason := truncate(err.Error(), maxErrorReason)
 			if _, markErr := s.queries.MarkFileFailed(context.Background(), db.MarkFileFailedParams{
 				ID:          uuidParam(fileID),
@@ -432,16 +438,29 @@ func (s *Service) startTranscode(fileID uuid.UUID, storageKey string) {
 }
 
 // transcode 下载原文件、渲染页图、上传页图并回写数据库。
-func (s *Service) transcode(ctx context.Context, fileID uuid.UUID, storageKey string) error {
+//
+// PDF 直接渲染；Office 文档先经 LibreOffice 转成 PDF 再走同一套渲染，
+// 两条路径的产出一致（页图 + 文本层），前端无需区分。
+func (s *Service) transcode(ctx context.Context, fileID uuid.UUID, storageKey, kind string) error {
 	workDir, err := os.MkdirTemp("", "thesis-pdf-*")
 	if err != nil {
 		return fmt.Errorf("创建临时目录: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(workDir) }()
 
-	pdfPath := path.Join(workDir, "source.pdf")
-	if err := s.download(ctx, storageKey, pdfPath); err != nil {
+	// 保留原始扩展名：LibreOffice 按扩展名判断文档类型，
+	// 存成 .pdf 会让它把 docx 当 PDF 打开而失败。
+	srcPath := path.Join(workDir, "source"+sourceExt(kind))
+	if err := s.download(ctx, storageKey, srcPath); err != nil {
 		return err
+	}
+
+	pdfPath := srcPath
+	if isOfficeKind(kind) {
+		pdfPath, err = ConvertToPDF(ctx, srcPath, workDir)
+		if err != nil {
+			return err
+		}
 	}
 
 	pages, err := RenderPDF(ctx, pdfPath, workDir, PageWidth)

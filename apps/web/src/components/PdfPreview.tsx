@@ -338,7 +338,11 @@ export function PdfPreview({
           message={
             meta.status === "rejected"
               ? "该文件未通过安全扫描，无法预览。"
-              : "文件处理失败，暂时无法预览。"
+              : meta.errorReason
+                ? // 服务端给出了具体原因（转换超时、缺少 LibreOffice 等），
+                  // 直接展示比一句笼统的「处理失败」有用得多。
+                  `文件处理失败：${meta.errorReason}`
+                : "文件处理失败，暂时无法预览。"
           }
           coverUrl={meta.coverUrl}
           openHref={openHref}

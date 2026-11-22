@@ -23,6 +23,29 @@
 
 > 说明：技术架构文档原定后端为 NestJS，经决策改为 **Go**，本文档与架构文档已同步。
 
+### 系统依赖
+
+转码流水线需要这些外部程序，缺失时对应格式无法预览（会如实显示失败原因）：
+
+| 程序 | 用途 | 必需性 |
+|---|---|---|
+| `pdftoppm` / `pdfinfo`（poppler-utils） | PDF 逐页渲染成 PNG | PDF 预览必需 |
+| `pdftotext`（poppler-utils） | 提取文本层供全文检索 | 可选，缺失只影响检索 |
+| `soffice`（LibreOffice） | Word / PPT / Excel 转 PDF 后预览 | Office 预览必需 |
+
+```bash
+# macOS
+brew install poppler && brew install --cask libreoffice
+# Debian / Ubuntu
+apt install poppler-utils libreoffice-writer libreoffice-impress libreoffice-calc
+# Windows（PowerShell）
+winget install TheDocumentFoundation.LibreOffice
+# poppler for Windows: 下载解压后把 bin 加入 PATH
+```
+
+后端会在 `PATH` 与各平台标准安装位置查找 `soffice`，
+未安装时 Office 文件会标记为 `failed` 并在 `errorReason` 里说明原因。
+
 ---
 
 ## 目录结构
@@ -143,6 +166,7 @@ make web-check   # 前端类型检查
 - [x] 信息流三档 API（关注流 / 全站流 / 热门流），游标分页
 - [x] 发帖、转发、点赞、收藏、评论
 - [x] 文件上传 + PDF 页图预览（SeaweedFS + pdftoppm）
+- [x] Word / PPT / Excel 转 PDF 后预览（LibreOffice headless，V-03）
 - [x] 统一检索（tsvector + trigram 回退）与通知中心
 - [x] SSR / SEO：论文详情与个人主页改为 Server Component，含 sitemap / robots
 

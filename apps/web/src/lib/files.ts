@@ -109,6 +109,12 @@ export type FileDTO = {
   createdAt: string;
   /** 首页预签名 URL；未生成时为 null。 */
   coverUrl: string | null;
+  /**
+   * status 为 failed / rejected 时的失败原因。
+   * 例如「未找到 LibreOffice」「转换超时」「文件损坏」——让用户能分清是
+   * 自己的文件有问题，还是服务端缺依赖。
+   */
+  errorReason: string | null;
 };
 
 export type PageDTO = {
@@ -246,6 +252,10 @@ export function normalizeFile(value: unknown): FileDTO {
     pageCount: num(value.pageCount),
     createdAt: str(value.createdAt),
     coverUrl: typeof value.coverUrl === "string" && value.coverUrl ? value.coverUrl : null,
+    errorReason:
+      typeof value.errorReason === "string" && value.errorReason.trim().length > 0
+        ? value.errorReason
+        : null,
   };
 }
 
@@ -579,7 +589,13 @@ export function isFailedStatus(status: FileStatus): boolean {
   return status === "rejected" || status === "failed";
 }
 
-/** 只有 PDF（含 Office 转 PDF 后的产物）才有页图预览。 */
+/**
+ * 报告该文件是否由 PDF 渲染而来（原生 PDF 或 Office 转 PDF 的产物）。
+ *
+ * 注意：**不要**用它决定要不要走 {@link PdfPreview}。Office 文档转码后
+ * 同样有页图，能否预览取决于 status 是否 ready（见 PdfPreview 内部判定），
+ * 取决于 kind 会把这些文件误判成「无预览」。此函数仅用于展示层面的分类。
+ */
 export function isPdfFile(file: FileDTO): boolean {
   return file.kind === "pdf" || file.mime === "application/pdf";
 }
