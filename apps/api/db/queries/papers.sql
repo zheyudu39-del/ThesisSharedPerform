@@ -27,3 +27,10 @@ LIMIT $1 OFFSET $2;
 
 -- name: CountPapers :one
 SELECT count(*) FROM papers;
+
+-- name: SetPaperPDFFile :one
+-- 把一份已上传的文件挂到论文上。pdf_file_id 为空表示卸载全文。
+UPDATE papers
+SET pdf_file_id = sqlc.narg('pdf_file_id')
+WHERE id = sqlc.arg('id')
+RETURNING *;

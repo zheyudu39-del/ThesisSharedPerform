@@ -260,3 +260,42 @@ func (q *Queries) ListPapers(ctx context.Context, arg ListPapersParams) ([]Paper
 	}
 	return items, nil
 }
+
+const setPaperPDFFile = `-- name: SetPaperPDFFile :one
+UPDATE papers
+SET pdf_file_id = $1
+WHERE id = $2
+RETURNING id, doi, arxiv_id, openreview_id, title, title_norm, authors, abstract, venue, published_at, citation_count, pdf_file_id, meta_source, meta_fetched_at, dedupe_hash, created_by, created_at, updated_at
+`
+
+type SetPaperPDFFileParams struct {
+	PdfFileID pgtype.UUID `json:"pdf_file_id"`
+	ID        pgtype.UUID `json:"id"`
+}
+
+// 把一份已上传的文件挂到论文上。pdf_file_id 为空表示卸载全文。
+func (q *Queries) SetPaperPDFFile(ctx context.Context, arg SetPaperPDFFileParams) (Paper, error) {
+	row := q.db.QueryRow(ctx, setPaperPDFFile, arg.PdfFileID, arg.ID)
+	var i Paper
+	err := row.Scan(
+		&i.ID,
+		&i.Doi,
+		&i.ArxivID,
+		&i.OpenreviewID,
+		&i.Title,
+		&i.TitleNorm,
+		&i.Authors,
+		&i.Abstract,
+		&i.Venue,
+		&i.PublishedAt,
+		&i.CitationCount,
+		&i.PdfFileID,
+		&i.MetaSource,
+		&i.MetaFetchedAt,
+		&i.DedupeHash,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}

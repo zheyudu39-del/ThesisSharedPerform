@@ -95,6 +95,58 @@ func (h *PaperHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"paper": p})
 }
 
+// SetPDFFile 处理 PATCH /api/v1/papers/{id}/pdf。
+//
+// 请求体 {"fileId": "..."}；fileId 为 null 或空串表示卸载全文。
+// 这是「论文页上传 PDF 后刷新还在」的那条链路：上传只把文件写进
+// files 表，关联论文记录靠这个接口。
+func (h *PaperHandler) SetPDFFile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+		return
+	}
+	paperID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "论文 ID 格式不正确")
+		return
+	}
+
+	var req struct {
+		FileID *string `json:"fileId"`
+	}
+	if !decodeOptionalRequest(w, r, &req) {
+		return
+	}
+
+	var fileID *uuid.UUID
+	if req.FileID != nil && *req.FileID != "" {
+		parsed, err := uuid.Parse(*req.FileID)
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, "validation_error", "文件 ID 格式不正确")
+			return
+		}
+		fileID = &parsed
+	}
+
+	updated, err := h.svc.SetPDFFile(r.Context(), userID, paperID, fileID)
+	if err != nil {
+		switch {
+		case errors.Is(err, paper.ErrNotFound):
+			writeError(w, http.StatusNotFound, "not_found", "论文不存在")
+		case errors.Is(err, paper.ErrForbidden):
+			writeError(w, http.StatusForbidden, "forbidden", "没有权限修改这篇论文的全文")
+		case errors.Is(err, paper.ErrInvalidInput):
+			writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		default:
+			slog.Error("设置论文全文失败", "err", err, "paperId", paperID)
+			writeError(w, http.StatusInternalServerError, "internal_error", "服务器内部错误")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"paper": updated})
+}
+
 // List 处理 GET /api/v1/papers。
 func (h *PaperHandler) List(w http.ResponseWriter, r *http.Request) {
 	limit := int32(20)

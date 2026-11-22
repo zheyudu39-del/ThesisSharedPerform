@@ -194,6 +194,9 @@ func New(d Deps) *http.Server {
 
 				// 论文解析：识别 DOI / arXiv 并抓取元数据，需登录（避免被匿名刷外部 API）。
 				r.Post("/papers/resolve", papers.Resolve)
+				// 论文全文挂载：上传只写 files 表，关联论文靠这个接口，
+				// 否则刷新后 pdfFileId 丢失、论文页又变回「还没有全文」。
+				r.Patch("/papers/{id}/pdf", papers.SetPDFFile)
 
 				// 信息流写操作在服务层事务中保证幂等。
 				r.Post("/posts", contents.CreatePost)

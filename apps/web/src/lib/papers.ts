@@ -85,6 +85,23 @@ export async function listPapers(limit = 20, offset = 0): Promise<PaperList> {
   return body as PaperList;
 }
 
+/**
+ * 把已上传的文件挂到论文上（PATCH /papers/{id}/pdf）。
+ *
+ * 上传本身只写 files 表；不调用这个接口，刷新后论文页又会显示「还没有全文」。
+ * 传 null 表示卸载全文。
+ */
+export async function setPaperPDFFile(paperId: string, fileId: string | null): Promise<PaperDTO> {
+  const body = await apiFetch(`/papers/${encodeURIComponent(paperId)}/pdf`, {
+    method: "PATCH",
+    body: JSON.stringify({ fileId }),
+  });
+  if (typeof body !== "object" || body === null) {
+    throw new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);
+  }
+  return normalizePaper((body as { paper: unknown }).paper);
+}
+
 /** 按 ID 查询单篇论文。 */
 export async function getPaper(id: string): Promise<PaperDTO> {
   const body = await apiFetch(`/papers/${encodeURIComponent(id)}`);

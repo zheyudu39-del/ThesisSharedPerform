@@ -145,7 +145,7 @@ export default async function PaperDetailPage({ params }: PageProps) {
             )}
           </dl>
 
-          <PaperFileSection pdfFileId={paper.pdfFileId} />
+          <PaperFileSection paperId={paper.id} pdfFileId={paper.pdfFileId} />
 
           {paper.abstract ? (
             <section>

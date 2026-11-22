@@ -32,6 +32,9 @@ type Paper struct {
 	CitationCount int       `json:"citationCount"`
 	MetaSource    string    `json:"metaSource"`
 	CreatedAt     time.Time `json:"createdAt"`
+	// PDFFileID 是挂在这篇论文上的全文文件（papers.pdf_file_id）。
+	// 为空表示还没有上传全文，前端降级为纯文本预览。
+	PDFFileID *uuid.UUID `json:"pdfFileId"`
 }
 
 // ResolveResult 表示一次「识别 + 抓取 + 入库」的结果。
@@ -50,6 +53,9 @@ type Querier interface {
 	GetPaperByID(context.Context, pgtype.UUID) (db.Paper, error)
 	ListPapers(context.Context, db.ListPapersParams) ([]db.Paper, error)
 	CountPapers(context.Context) (int64, error)
+	SetPaperPDFFile(context.Context, db.SetPaperPDFFileParams) (db.Paper, error)
+	GetFileByID(context.Context, pgtype.UUID) (db.File, error)
+	GetUserByID(context.Context, pgtype.UUID) (db.User, error)
 }
 
 // MetadataFetcher 抽象外部抓取，便于测试。
@@ -116,6 +122,77 @@ func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (Paper, error) {
 		return Paper{}, err
 	}
 	return toPaper(record), nil
+}
+
+// SetPDFFile 把一份已上传的文件设为这篇论文的全文（papers.pdf_file_id）。
+//
+// 权限规则：
+//   - 论文的创建者可以挂载；管理员也可以（运营补录全文）。
+//   - 文件必须属于调用者本人（管理员除外），否则等于把别人的文件
+//     悄悄挪到自己的论文上。
+//   - 传空 fileID 表示卸载全文。
+//
+// 为什么不校验「文件是不是 PDF」：Word / LaTeX 源文件同样可以作为
+// 论文全文保存，前端按 kind 降级展示。类型判断交给前端与转码流水线。
+func (s *Service) SetPDFFile(ctx context.Context, userID, paperID uuid.UUID, fileID *uuid.UUID) (Paper, error) {
+	record, err := s.querier.GetPaperByID(ctx, pgtype.UUID{Bytes: paperID, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Paper{}, ErrNotFound
+		}
+		return Paper{}, err
+	}
+
+	// 创建者之外的人需要管理员身份。created_by 为空（系统导入的论文）
+	// 时只有管理员能挂全文。
+	isCreator := record.CreatedBy.Valid && uuid.UUID(record.CreatedBy.Bytes) == userID
+	if !isCreator {
+		user, err := s.querier.GetUserByID(ctx, pgtype.UUID{Bytes: userID, Valid: true})
+		if err != nil {
+			return Paper{}, ErrForbidden
+		}
+		if user.Role != db.UserRoleAdmin {
+			return Paper{}, ErrForbidden
+		}
+	}
+
+	var target pgtype.UUID
+	if fileID != nil {
+		if *fileID == uuid.Nil {
+			return Paper{}, fmt.Errorf("%w: 文件 ID 不能为 uuid.Nil", ErrInvalidInput)
+		}
+		file, err := s.querier.GetFileByID(ctx, pgtype.UUID{Bytes: *fileID, Valid: true})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return Paper{}, fmt.Errorf("%w: 文件不存在", ErrInvalidInput)
+			}
+			return Paper{}, err
+		}
+		// 只有管理员能挂别人上传的文件。
+		if uuid.UUID(file.OwnerID.Bytes) != userID {
+			user, err := s.querier.GetUserByID(ctx, pgtype.UUID{Bytes: userID, Valid: true})
+			if err != nil || user.Role != db.UserRoleAdmin {
+				return Paper{}, ErrForbidden
+			}
+		}
+		// 被拒绝或转码失败的文件不挂：挂上去也打不开，等于给用户一个坏链接。
+		if file.Status == db.FileStatusRejected || file.Status == db.FileStatusFailed {
+			return Paper{}, fmt.Errorf("%w: 该文件未通过校验或处理失败", ErrInvalidInput)
+		}
+		target = pgtype.UUID{Bytes: *fileID, Valid: true}
+	}
+
+	updated, err := s.querier.SetPaperPDFFile(ctx, db.SetPaperPDFFileParams{
+		PdfFileID: target,
+		ID:        pgtype.UUID{Bytes: paperID, Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Paper{}, ErrNotFound
+		}
+		return Paper{}, err
+	}
+	return toPaper(updated), nil
 }
 
 // List 分页列出论文。
@@ -218,7 +295,17 @@ func toPaper(r db.Paper) Paper {
 		CitationCount: int(r.CitationCount),
 		MetaSource:    deref(r.MetaSource),
 		CreatedAt:     r.CreatedAt.Time,
+		PDFFileID:     uuidPtr(r.PdfFileID),
 	}
+}
+
+// uuidPtr 把可空的 uuid 列转成指针；NULL 转成 nil。
+func uuidPtr(v pgtype.UUID) *uuid.UUID {
+	if !v.Valid {
+		return nil
+	}
+	id := uuid.UUID(v.Bytes)
+	return &id
 }
 
 func deref(s *string) string {
