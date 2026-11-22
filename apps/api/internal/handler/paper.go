@@ -159,6 +159,119 @@ func (h *PaperHandler) CreateManual(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, result)
 }
 
+type updatePaperRequest struct {
+	Title         *string `json:"title"`
+	Authors       *[]struct {
+		Name        string `json:"name"`
+		Affiliation string `json:"affiliation"`
+		ORCID       string `json:"orcid"`
+	} `json:"authors"`
+	Abstract      *string `json:"abstract"`
+	Venue         *string `json:"venue"`
+	PublishedYear *int    `json:"publishedYear"`
+	CitationCount *int    `json:"citationCount"`
+}
+
+// Update 处理 PATCH /api/v1/papers/{id}，局部更新元数据（PRD P-02）。
+//
+// 字段为 nil 表示不修改；空字符串表示清空。标题与作者会触发
+// title_norm / dedupe_hash 重算，保证软去重仍然有效。
+func (h *PaperHandler) Update(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+		return
+	}
+	paperID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "论文 ID 格式不正确")
+		return
+	}
+
+	var req updatePaperRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+
+	input := paper.UpdateMetadataInput{
+		Title:         req.Title,
+		Abstract:      req.Abstract,
+		Venue:         req.Venue,
+		PublishedYear: req.PublishedYear,
+		CitationCount: req.CitationCount,
+	}
+	if req.Authors != nil {
+		authors := make([]paper.Author, 0, len(*req.Authors))
+		for _, a := range *req.Authors {
+			authors = append(authors, paper.Author{
+				Name: a.Name, Affiliation: a.Affiliation, ORCID: a.ORCID,
+			})
+		}
+		input.Authors = &authors
+	}
+
+	updated, err := h.svc.UpdateMetadata(r.Context(), userID, paperID, input)
+	if err != nil {
+		switch {
+		case errors.Is(err, paper.ErrNotFound):
+			writeError(w, http.StatusNotFound, "not_found", "论文不存在")
+		case errors.Is(err, paper.ErrForbidden):
+			writeError(w, http.StatusForbidden, "forbidden", "没有权限修改这篇论文")
+		case errors.Is(err, paper.ErrInvalidInput):
+			writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		default:
+			slog.Error("更新论文失败", "err", err, "paperId", paperID)
+			writeError(w, http.StatusInternalServerError, "internal_error", "服务器内部错误")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"paper": updated})
+}
+
+// Merge 处理 POST /api/v1/papers/{id}/merge，请求体 {duplicateId}。
+//
+// 把 {duplicateId} 合并进 {id} 并删除重复记录（PRD P-02）。
+func (h *PaperHandler) Merge(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "请先登录")
+		return
+	}
+	keepID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_id", "论文 ID 格式不正确")
+		return
+	}
+	var req struct {
+		DuplicateID string `json:"duplicateId"`
+	}
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	dupID, err := uuid.Parse(req.DuplicateID)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "validation_error", "重复论文 ID 格式不正确")
+		return
+	}
+
+	result, err := h.svc.MergePapers(r.Context(), userID, keepID, dupID)
+	if err != nil {
+		switch {
+		case errors.Is(err, paper.ErrNotFound):
+			writeError(w, http.StatusNotFound, "not_found", "论文不存在")
+		case errors.Is(err, paper.ErrForbidden):
+			writeError(w, http.StatusForbidden, "forbidden", "没有权限合并这两篇论文")
+		case errors.Is(err, paper.ErrInvalidInput):
+			writeError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+		default:
+			slog.Error("合并论文失败", "err", err, "keep", keepID, "dup", dupID)
+			writeError(w, http.StatusInternalServerError, "internal_error", "服务器内部错误")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 // SetPDFFile 处理 PATCH /api/v1/papers/{id}/pdf。
 //
 // 请求体 {"fileId": "..."}；fileId 为 null 或空串表示卸载全文。

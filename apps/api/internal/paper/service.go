@@ -55,6 +55,14 @@ type Querier interface {
 	ListPapers(context.Context, db.ListPapersParams) ([]db.Paper, error)
 	CountPapers(context.Context) (int64, error)
 	SetPaperPDFFile(context.Context, db.SetPaperPDFFileParams) (db.Paper, error)
+	UpdatePaperMetadata(context.Context, db.UpdatePaperMetadataParams) (db.Paper, error)
+	MergePaperPosts(context.Context, db.MergePaperPostsParams) (int64, error)
+	MergePaperTags(context.Context, db.MergePaperTagsParams) (int64, error)
+	MergePaperLibraryItems(context.Context, db.MergePaperLibraryItemsParams) (int64, error)
+	MergePaperCollectionItems(context.Context, db.MergePaperCollectionItemsParams) (int64, error)
+	MergePaperDocReferences(context.Context, db.MergePaperDocReferencesParams) (int64, error)
+	DeletePaper(context.Context, pgtype.UUID) error
+	ClearPaperDedupeHash(context.Context, pgtype.UUID) error
 	GetFileByID(context.Context, pgtype.UUID) (db.File, error)
 	GetUserByID(context.Context, pgtype.UUID) (db.User, error)
 }
@@ -262,17 +270,8 @@ func (s *Service) SetPDFFile(ctx context.Context, userID, paperID uuid.UUID, fil
 		return Paper{}, err
 	}
 
-	// 创建者之外的人需要管理员身份。created_by 为空（系统导入的论文）
-	// 时只有管理员能挂全文。
-	isCreator := record.CreatedBy.Valid && uuid.UUID(record.CreatedBy.Bytes) == userID
-	if !isCreator {
-		user, err := s.querier.GetUserByID(ctx, pgtype.UUID{Bytes: userID, Valid: true})
-		if err != nil {
-			return Paper{}, ErrForbidden
-		}
-		if user.Role != db.UserRoleAdmin {
-			return Paper{}, ErrForbidden
-		}
+	if err := s.requireEditor(ctx, record, userID); err != nil {
+		return Paper{}, err
 	}
 
 	var target pgtype.UUID
@@ -312,6 +311,295 @@ func (s *Service) SetPDFFile(ctx context.Context, userID, paperID uuid.UUID, fil
 		return Paper{}, err
 	}
 	return toPaper(updated), nil
+}
+
+// requireEditor 校验调用者能否修改这篇论文。
+//
+// 规则：创建者本人，或平台管理员。created_by 为空（系统导入）时
+// 只有管理员能改——否则任何登录用户都能编辑运营抓来的论文。
+func (s *Service) requireEditor(ctx context.Context, record db.Paper, userID uuid.UUID) error {
+	if record.CreatedBy.Valid && uuid.UUID(record.CreatedBy.Bytes) == userID {
+		return nil
+	}
+	user, err := s.querier.GetUserByID(ctx, pgtype.UUID{Bytes: userID, Valid: true})
+	if err != nil {
+		return ErrForbidden
+	}
+	if user.Role != db.UserRoleAdmin {
+		return ErrForbidden
+	}
+	return nil
+}
+
+// UpdateMetadataInput 是元数据局部更新入参（PRD P-02）。
+// nil 表示该字段未提供，保持不变；空字符串表示清空。
+type UpdateMetadataInput struct {
+	Title         *string
+	Authors       *[]Author
+	Abstract      *string
+	Venue         *string
+	PublishedYear *int
+	CitationCount *int
+}
+
+// UpdateMetadata 修改论文元数据，要求创建者或管理员。
+//
+// title_norm 与 dedupe_hash 跟着标题/作者/年份重算：不重算的话
+// 改了标题之后软去重仍指向旧标题，手动补录会重复建出第二篇。
+func (s *Service) UpdateMetadata(ctx context.Context, userID, paperID uuid.UUID, input UpdateMetadataInput) (Paper, error) {
+	record, err := s.querier.GetPaperByID(ctx, pgtype.UUID{Bytes: paperID, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Paper{}, ErrNotFound
+		}
+		return Paper{}, err
+	}
+	if err := s.requireEditor(ctx, record, userID); err != nil {
+		return Paper{}, err
+	}
+
+	params := db.UpdatePaperMetadataParams{ID: pgtype.UUID{Bytes: paperID, Valid: true}}
+
+	if input.Title != nil {
+		title := strings.TrimSpace(*input.Title)
+		if title == "" {
+			return Paper{}, fmt.Errorf("%w: 标题不能为空", ErrInvalidInput)
+		}
+		if utf8.RuneCountInString(title) > 512 {
+			return Paper{}, fmt.Errorf("%w: 标题不能超过 512 个字符", ErrInvalidInput)
+		}
+		params.Title = &title
+	}
+
+	if input.Authors != nil {
+		authors := make([]Author, 0, len(*input.Authors))
+		for _, a := range *input.Authors {
+			name := strings.TrimSpace(a.Name)
+			if name == "" {
+				continue
+			}
+			authors = append(authors, Author{
+				Name:        name,
+				Affiliation: strings.TrimSpace(a.Affiliation),
+				ORCID:       strings.TrimSpace(a.ORCID),
+			})
+		}
+		if len(authors) == 0 {
+			return Paper{}, fmt.Errorf("%w: 至少需要一位作者", ErrInvalidInput)
+		}
+		raw, err := json.Marshal(authors)
+		if err != nil {
+			return Paper{}, fmt.Errorf("序列化作者失败: %w", err)
+		}
+		params.Authors = raw
+	}
+
+	if input.Abstract != nil {
+		params.Abstract = nullableString(*input.Abstract)
+	}
+	if input.Venue != nil {
+		params.Venue = nullableString(*input.Venue)
+	}
+	if input.CitationCount != nil {
+		if *input.CitationCount < 0 {
+			return Paper{}, fmt.Errorf("%w: 引用数不能为负", ErrInvalidInput)
+		}
+		count := int32(*input.CitationCount)
+		params.CitationCount = &count
+	}
+	if input.PublishedYear != nil {
+		params.PublishedAt = dateFromYear(*input.PublishedYear)
+	}
+
+	// 标题或作者变了 → 重算归一化标题与软去重哈希。
+	if input.Title != nil || input.Authors != nil {
+		meta := Metadata{
+			Title:   deref(params.Title),
+			Authors: authorsFromRaw(params.Authors, record.Authors),
+			DOI:     deref(record.Doi),
+			ArxivID: deref(record.ArxivID),
+		}
+		if meta.Title == "" {
+			meta.Title = record.Title
+		}
+		if input.PublishedYear != nil {
+			meta.PublishedYear = *input.PublishedYear
+		} else {
+			meta.PublishedYear = yearOf(record.PublishedAt)
+		}
+		norm := normalizeTitle(meta.Title)
+		params.TitleNorm = &norm
+		// 有强标识时不参与软去重（dedupeHash 返回空串），保持与创建时一致。
+		hash := dedupeHash(meta)
+		if hash == "" {
+			// 需要把 dedupe_hash 显式清成 NULL：COALESCE 语义下传 nil 是「不改」。
+			empty := ""
+			params.DedupeHash = &empty
+		} else {
+			params.DedupeHash = &hash
+		}
+	}
+
+	updated, err := s.querier.UpdatePaperMetadata(ctx, params)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Paper{}, ErrNotFound
+		}
+		if isUniqueViolation(err) {
+			return Paper{}, fmt.Errorf("%w: 已存在相同去重键的论文", ErrInvalidInput)
+		}
+		return Paper{}, err
+	}
+	return toPaper(updated), nil
+}
+
+// MergeResult 是一次合并的结果。
+type MergeResult struct {
+	// Paper 是保留下来的那篇（合并后的状态）。
+	Paper Paper `json:"paper"`
+	// Moved 是被迁移的关联数量，按类型统计，便于前端告诉用户发生了什么。
+	Moved struct {
+		Posts           int64 `json:"posts"`
+		Tags            int64 `json:"tags"`
+		LibraryItems    int64 `json:"libraryItems"`
+		CollectionItems int64 `json:"collectionItems"`
+		DocReferences   int64 `json:"docReferences"`
+	} `json:"moved"`
+}
+
+// MergePapers 把 duplicateID 合并进 keepID，然后删除重复记录（PRD P-02）。
+//
+// 为什么不是「删掉重复的那篇」了事：帖子、标签、群资料库、策展项、
+// 文档引用都可能挂在它上面，直接删会把这些关联一并丢掉（或按外键
+// 规则置空），用户的讨论与收藏就消失了。
+//
+// 全文（pdf_file_id）：保留方没有全文时继承重复方的，否则保持保留方的
+// ——两篇都挂了全文时以保留方为准，避免悄悄替换用户已经看过的版本。
+//
+// 权限：两篇论文都必须由调用者本人创建（或调用者是管理员）。
+// 只校验其中一篇会让人把别人的论文并进自己的记录里。
+func (s *Service) MergePapers(ctx context.Context, userID, keepID, duplicateID uuid.UUID) (MergeResult, error) {
+	if keepID == duplicateID {
+		return MergeResult{}, fmt.Errorf("%w: 不能把论文合并到自己", ErrInvalidInput)
+	}
+	if s.pool == nil {
+		// 合并跨多张表，必须在一个事务里；没有连接池（单元测试替身）
+		// 就无法保证原子性，直接拒绝而不是留下半完成状态。
+		return MergeResult{}, fmt.Errorf("合并需要数据库连接")
+	}
+
+	keep, err := s.querier.GetPaperByID(ctx, pgtype.UUID{Bytes: keepID, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MergeResult{}, ErrNotFound
+		}
+		return MergeResult{}, err
+	}
+	dup, err := s.querier.GetPaperByID(ctx, pgtype.UUID{Bytes: duplicateID, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return MergeResult{}, ErrNotFound
+		}
+		return MergeResult{}, err
+	}
+	if err := s.requireEditor(ctx, keep, userID); err != nil {
+		return MergeResult{}, err
+	}
+	if err := s.requireEditor(ctx, dup, userID); err != nil {
+		return MergeResult{}, err
+	}
+
+	// 合并必须在事务里：中途失败会留下「帖子已迁移但论文没删」的
+	// 半完成状态，用户看到两篇都还在、帖子却挂错了地方。
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return MergeResult{}, fmt.Errorf("开启合并事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	q := db.New(tx)
+
+	var result MergeResult
+
+	// 先清重复方的软去重哈希：两篇的归一化标题相同，哈希也相同，
+	// 不清会撞 dedupe_hash 唯一索引——不过这一步只影响后续写入，
+	// 真正要小心的是删除顺序。
+	if err := q.ClearPaperDedupeHash(ctx, pgtype.UUID{Bytes: duplicateID, Valid: true}); err != nil {
+		return MergeResult{}, fmt.Errorf("清理去重键失败: %w", err)
+	}
+
+	result.Moved.Posts, err = q.MergePaperPosts(ctx, db.MergePaperPostsParams{
+		KeepID: pgtype.UUID{Bytes: keepID, Valid: true},
+		DupID:  pgtype.UUID{Bytes: duplicateID, Valid: true},
+	})
+	if err != nil {
+		return MergeResult{}, fmt.Errorf("迁移帖子失败: %w", err)
+	}
+	result.Moved.Tags, err = q.MergePaperTags(ctx, db.MergePaperTagsParams{
+		KeepID: pgtype.UUID{Bytes: keepID, Valid: true},
+		DupID:  pgtype.UUID{Bytes: duplicateID, Valid: true},
+	})
+	if err != nil {
+		return MergeResult{}, fmt.Errorf("迁移标签失败: %w", err)
+	}
+	result.Moved.LibraryItems, err = q.MergePaperLibraryItems(ctx, db.MergePaperLibraryItemsParams{
+		KeepID: pgtype.UUID{Bytes: keepID, Valid: true},
+		DupID:  pgtype.UUID{Bytes: duplicateID, Valid: true},
+	})
+	if err != nil {
+		return MergeResult{}, fmt.Errorf("迁移群资料库条目失败: %w", err)
+	}
+	result.Moved.CollectionItems, err = q.MergePaperCollectionItems(ctx, db.MergePaperCollectionItemsParams{
+		KeepID: pgtype.UUID{Bytes: keepID, Valid: true},
+		DupID:  pgtype.UUID{Bytes: duplicateID, Valid: true},
+	})
+	if err != nil {
+		return MergeResult{}, fmt.Errorf("迁移策展项失败: %w", err)
+	}
+	result.Moved.DocReferences, err = q.MergePaperDocReferences(ctx, db.MergePaperDocReferencesParams{
+		KeepID: pgtype.UUID{Bytes: keepID, Valid: true},
+		DupID:  pgtype.UUID{Bytes: duplicateID, Valid: true},
+	})
+	if err != nil {
+		return MergeResult{}, fmt.Errorf("迁移文档引用失败: %w", err)
+	}
+
+	// 保留方没有全文时继承重复方的。
+	if !keep.PdfFileID.Valid && dup.PdfFileID.Valid {
+		if _, err := q.SetPaperPDFFile(ctx, db.SetPaperPDFFileParams{
+			PdfFileID: dup.PdfFileID,
+			ID:        pgtype.UUID{Bytes: keepID, Valid: true},
+		}); err != nil {
+			return MergeResult{}, fmt.Errorf("继承全文失败: %w", err)
+		}
+	}
+
+	if err := q.DeletePaper(ctx, pgtype.UUID{Bytes: duplicateID, Valid: true}); err != nil {
+		return MergeResult{}, fmt.Errorf("删除重复论文失败: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return MergeResult{}, fmt.Errorf("提交合并事务失败: %w", err)
+	}
+
+	merged, err := s.GetByID(ctx, keepID)
+	if err != nil {
+		return MergeResult{}, err
+	}
+	result.Paper = merged
+	return result, nil
+}
+
+// authorsFromRaw 解析更新参数里的作者 JSON；未提供时回落到原有作者。
+func authorsFromRaw(raw []byte, fallback []byte) []Author {
+	source := raw
+	if len(source) == 0 {
+		source = fallback
+	}
+	var authors []Author
+	if len(source) > 0 {
+		_ = json.Unmarshal(source, &authors)
+	}
+	return authors
 }
 
 // List 分页列出论文。

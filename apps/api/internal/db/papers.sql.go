@@ -11,6 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const clearPaperDedupeHash = `-- name: ClearPaperDedupeHash :exec
+UPDATE papers SET dedupe_hash = NULL WHERE id = $1::uuid
+`
+
+// 合并前把重复方的软去重哈希清空：两篇论文归一化标题相同，
+// 哈希也相同，不先清掉会撞 dedupe_hash 的唯一索引。
+func (q *Queries) ClearPaperDedupeHash(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, clearPaperDedupeHash, id)
+	return err
+}
+
 const countPapers = `-- name: CountPapers :one
 SELECT count(*) FROM papers
 `
@@ -88,6 +99,42 @@ func (q *Queries) CreatePaper(ctx context.Context, arg CreatePaperParams) (Paper
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
+	return i, err
+}
+
+const deletePaper = `-- name: DeletePaper :exec
+DELETE FROM papers WHERE id = $1::uuid
+`
+
+// 合并完成后删除重复记录。此时已没有外键指向它。
+func (q *Queries) DeletePaper(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deletePaper, id)
+	return err
+}
+
+const findPaperDuplicate = `-- name: FindPaperDuplicate :one
+SELECT id, title FROM papers
+WHERE id <> $1::uuid
+  AND title_norm = $2::varchar(512)
+LIMIT 1
+`
+
+type FindPaperDuplicateParams struct {
+	ExcludeID pgtype.UUID `json:"exclude_id"`
+	TitleNorm string      `json:"title_norm"`
+}
+
+type FindPaperDuplicateRow struct {
+	ID    pgtype.UUID `json:"id"`
+	Title string      `json:"title"`
+}
+
+// 合并前查重：标题归一化 + 第一作者 + 年份相同的另一篇论文。
+// 用于「两篇重复记录合并成一篇」的场景（PRD P-02）。
+func (q *Queries) FindPaperDuplicate(ctx context.Context, arg FindPaperDuplicateParams) (FindPaperDuplicateRow, error) {
+	row := q.db.QueryRow(ctx, findPaperDuplicate, arg.ExcludeID, arg.TitleNorm)
+	var i FindPaperDuplicateRow
+	err := row.Scan(&i.ID, &i.Title)
 	return i, err
 }
 
@@ -261,6 +308,103 @@ func (q *Queries) ListPapers(ctx context.Context, arg ListPapersParams) ([]Paper
 	return items, nil
 }
 
+const mergePaperCollectionItems = `-- name: MergePaperCollectionItems :execrows
+UPDATE collection_items SET paper_id = $1::uuid
+WHERE paper_id = $2::uuid
+`
+
+type MergePaperCollectionItemsParams struct {
+	KeepID pgtype.UUID `json:"keep_id"`
+	DupID  pgtype.UUID `json:"dup_id"`
+}
+
+// 合并：策展项改挂到保留的论文。
+func (q *Queries) MergePaperCollectionItems(ctx context.Context, arg MergePaperCollectionItemsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, mergePaperCollectionItems, arg.KeepID, arg.DupID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const mergePaperDocReferences = `-- name: MergePaperDocReferences :execrows
+UPDATE doc_references SET paper_id = $1::uuid
+WHERE paper_id = $2::uuid
+`
+
+type MergePaperDocReferencesParams struct {
+	KeepID pgtype.UUID `json:"keep_id"`
+	DupID  pgtype.UUID `json:"dup_id"`
+}
+
+// 合并：文档引用改指向保留的论文。
+func (q *Queries) MergePaperDocReferences(ctx context.Context, arg MergePaperDocReferencesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, mergePaperDocReferences, arg.KeepID, arg.DupID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const mergePaperLibraryItems = `-- name: MergePaperLibraryItems :execrows
+UPDATE group_library_items SET paper_id = $1::uuid
+WHERE paper_id = $2::uuid
+`
+
+type MergePaperLibraryItemsParams struct {
+	KeepID pgtype.UUID `json:"keep_id"`
+	DupID  pgtype.UUID `json:"dup_id"`
+}
+
+// 合并：群资料库里的条目改挂到保留的论文。
+func (q *Queries) MergePaperLibraryItems(ctx context.Context, arg MergePaperLibraryItemsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, mergePaperLibraryItems, arg.KeepID, arg.DupID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const mergePaperPosts = `-- name: MergePaperPosts :execrows
+UPDATE posts SET paper_id = $1::uuid
+WHERE paper_id = $2::uuid
+`
+
+type MergePaperPostsParams struct {
+	KeepID pgtype.UUID `json:"keep_id"`
+	DupID  pgtype.UUID `json:"dup_id"`
+}
+
+// 合并：把重复论文下的帖子挂到保留的论文上。
+func (q *Queries) MergePaperPosts(ctx context.Context, arg MergePaperPostsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, mergePaperPosts, arg.KeepID, arg.DupID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const mergePaperTags = `-- name: MergePaperTags :execrows
+INSERT INTO paper_tags (paper_id, tag_id)
+SELECT $1::uuid, tag_id
+  FROM paper_tags WHERE paper_id = $2::uuid
+ON CONFLICT DO NOTHING
+`
+
+type MergePaperTagsParams struct {
+	KeepID pgtype.UUID `json:"keep_id"`
+	DupID  pgtype.UUID `json:"dup_id"`
+}
+
+// 合并：迁移标签，跳过保留方已有的（paper_tags 主键是 (paper_id, tag_id)）。
+func (q *Queries) MergePaperTags(ctx context.Context, arg MergePaperTagsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, mergePaperTags, arg.KeepID, arg.DupID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const setPaperPDFFile = `-- name: SetPaperPDFFile :one
 UPDATE papers
 SET pdf_file_id = $1
@@ -276,6 +420,74 @@ type SetPaperPDFFileParams struct {
 // 把一份已上传的文件挂到论文上。pdf_file_id 为空表示卸载全文。
 func (q *Queries) SetPaperPDFFile(ctx context.Context, arg SetPaperPDFFileParams) (Paper, error) {
 	row := q.db.QueryRow(ctx, setPaperPDFFile, arg.PdfFileID, arg.ID)
+	var i Paper
+	err := row.Scan(
+		&i.ID,
+		&i.Doi,
+		&i.ArxivID,
+		&i.OpenreviewID,
+		&i.Title,
+		&i.TitleNorm,
+		&i.Authors,
+		&i.Abstract,
+		&i.Venue,
+		&i.PublishedAt,
+		&i.CitationCount,
+		&i.PdfFileID,
+		&i.MetaSource,
+		&i.MetaFetchedAt,
+		&i.DedupeHash,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updatePaperMetadata = `-- name: UpdatePaperMetadata :one
+UPDATE papers SET
+    title           = COALESCE($1::text, title),
+    title_norm      = COALESCE($2::varchar(512), title_norm),
+    authors         = COALESCE($3::jsonb, authors),
+    abstract        = COALESCE($4::text, abstract),
+    venue           = COALESCE($5::varchar(256), venue),
+    published_at    = COALESCE($6::date, published_at),
+    citation_count  = COALESCE($7::integer, citation_count),
+    dedupe_hash     = COALESCE($8::char(64), dedupe_hash)
+WHERE id = $9
+RETURNING id, doi, arxiv_id, openreview_id, title, title_norm, authors, abstract, venue, published_at, citation_count, pdf_file_id, meta_source, meta_fetched_at, dedupe_hash, created_by, created_at, updated_at
+`
+
+type UpdatePaperMetadataParams struct {
+	Title         *string     `json:"title"`
+	TitleNorm     *string     `json:"title_norm"`
+	Authors       []byte      `json:"authors"`
+	Abstract      *string     `json:"abstract"`
+	Venue         *string     `json:"venue"`
+	PublishedAt   pgtype.Date `json:"published_at"`
+	CitationCount *int32      `json:"citation_count"`
+	DedupeHash    *string     `json:"dedupe_hash"`
+	ID            pgtype.UUID `json:"id"`
+}
+
+// 元数据局部更新（PRD P-02）：参数为 NULL 表示「本次不修改」。
+// 用 COALESCE 在单条语句内完成，避免读-改-写之间的并发覆盖。
+//
+// title_norm 与 dedupe_hash 必须跟着标题/作者/年份一起重算，
+// 否则改了标题之后软去重会失效（旧哈希指向旧标题）。
+// 这两项由服务层算好后传入；传 NULL 表示标题相关字段没变。
+func (q *Queries) UpdatePaperMetadata(ctx context.Context, arg UpdatePaperMetadataParams) (Paper, error) {
+	row := q.db.QueryRow(ctx, updatePaperMetadata,
+		arg.Title,
+		arg.TitleNorm,
+		arg.Authors,
+		arg.Abstract,
+		arg.Venue,
+		arg.PublishedAt,
+		arg.CitationCount,
+		arg.DedupeHash,
+		arg.ID,
+	)
 	var i Paper
 	err := row.Scan(
 		&i.ID,

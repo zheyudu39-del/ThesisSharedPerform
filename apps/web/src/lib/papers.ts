@@ -72,6 +72,65 @@ export async function resolvePaper(input: string): Promise<ResolveResult> {
   return body as ResolveResult;
 }
 
+/** 元数据局部更新入参（PRD P-02）。省略的字段保持不变。 */
+export type UpdatePaperInput = {
+  title?: string;
+  authors?: PaperAuthor[];
+  abstract?: string;
+  venue?: string;
+  publishedYear?: number;
+  citationCount?: number;
+};
+
+/**
+ * 局部更新论文元数据。
+ *
+ * 只有创建者与管理员能改；改了标题或作者后，服务端会重算归一化标题
+ * 与软去重哈希，保证手动补录的去重仍然有效。
+ */
+export async function updatePaper(id: string, input: UpdatePaperInput): Promise<PaperDTO> {
+  const body = await apiFetch(`/papers/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+  if (typeof body !== "object" || body === null) {
+    throw new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);
+  }
+  return normalizePaper((body as { paper: unknown }).paper);
+}
+
+export type MergeResult = {
+  paper: PaperDTO;
+  moved: {
+    posts: number;
+    tags: number;
+    libraryItems: number;
+    collectionItems: number;
+    docReferences: number;
+  };
+};
+
+/**
+ * 把重复论文合并进保留的论文（PRD P-02）。
+ *
+ * 帖子、标签、群资料库、策展项、文档引用都会迁到保留方，
+ * 重复记录随后被删除。两篇论文都必须是当前用户创建的（或管理员）。
+ */
+export async function mergePapers(keepId: string, duplicateId: string): Promise<MergeResult> {
+  const body = await apiFetch(`/papers/${encodeURIComponent(keepId)}/merge`, {
+    method: "POST",
+    body: JSON.stringify({ duplicateId }),
+  });
+  if (typeof body !== "object" || body === null) {
+    throw new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);
+  }
+  const record = body as Record<string, unknown>;
+  return {
+    paper: normalizePaper(record.paper),
+    moved: (record.moved ?? {}) as MergeResult["moved"],
+  };
+}
+
 /** 手动补录入参（PRD P-04）。标题与至少一位作者必填。 */
 export type CreateManualPaperInput = {
   title: string;

@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import type { Editor } from "@tiptap/react";
 import {
+  createAnnotation,
   createSnapshot,
   listAnnotations,
   listSnapshots,
@@ -17,7 +19,16 @@ import {
  * 两者都是 REST 数据，不参与实时同步——快照是时间点副本，
  * 批注锚点在服务端用 Yjs RelativePosition 维护。
  */
-export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdit: boolean }) {
+export function DocSidebar({
+  documentId,
+  canEdit,
+  editor,
+}: {
+  documentId: string;
+  canEdit: boolean;
+  /** 编辑器实例。批注锚点需要它读当前选区；未就绪时只读列表。 */
+  editor: Editor | null;
+}) {
   const [tab, setTab] = useState<"snapshots" | "annotations">("snapshots");
   const [snapshots, setSnapshots] = useState<SnapshotDTO[]>([]);
   const [annotations, setAnnotations] = useState<AnnotationDTO[]>([]);
@@ -27,6 +38,10 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
   // 命名快照：展开输入框填写里程碑名称，留空则创建普通快照。
   const [snapshotFormOpen, setSnapshotFormOpen] = useState(false);
   const [snapshotLabel, setSnapshotLabel] = useState("");
+  // 批注创建：展开后读取编辑器当前选区，随内容一起提交。
+  const [annotationFormOpen, setAnnotationFormOpen] = useState(false);
+  const [annotationText, setAnnotationText] = useState("");
+  const [annotationCreating, setAnnotationCreating] = useState(false);
   // 正在回滚的版本号；非 null 时禁用所有回滚按钮，避免并发触发。
   const [restoring, setRestoring] = useState<number | null>(null);
   // 回滚成功后的提示。需要区分两种情况：
@@ -101,6 +116,51 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
       setError(err instanceof Error ? err.message : "回滚失败");
     } finally {
       setRestoring(null);
+    }
+  }
+
+  /**
+   * 创建批注（PRD D-05）。
+   *
+   * 锚点用 ProseMirror 的绝对位置（from/to）：REST 侧只把它当作
+   * 不透明 JSON 存取，不解析语义。选中的原文一并保存，
+   * 列表里能显示「批注针对的是哪句话」。
+   *
+   * 没有选区时不允许创建：批注的意义就是「针对某段文字」，
+   * 全文批注应该用文档评论区而不是这里。
+   */
+  async function handleCreateAnnotation() {
+    const content = annotationText.trim();
+    if (!content) {
+      setError("请填写批注内容");
+      return;
+    }
+    if (!editor) {
+      setError("编辑器尚未就绪，请稍后再试");
+      return;
+    }
+    const { from, to } = editor.state.selection;
+    if (from === to) {
+      setError("请先在正文里选中一段文字，再添加批注");
+      return;
+    }
+    const quotedText = editor.state.doc.textBetween(from, to, " ").slice(0, 2000);
+
+    setAnnotationCreating(true);
+    setError(null);
+    try {
+      await createAnnotation(documentId, {
+        anchor: { from, to },
+        quotedText,
+        content,
+      });
+      setAnnotationText("");
+      setAnnotationFormOpen(false);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "创建批注失败");
+    } finally {
+      setAnnotationCreating(false);
     }
   }
 
@@ -245,9 +305,50 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
 
       {tab === "annotations" && (
         <section className="rounded-[12px] border border-line bg-surface p-3.5">
-          <h2 className="mb-2.5 font-mono text-[0.68rem] tracking-[0.1em] text-ink-3 uppercase">
-            批注 · {annotations.length}
-          </h2>
+          <div className="mb-2.5 flex items-center justify-between">
+            <h2 className="font-mono text-[0.68rem] tracking-[0.1em] text-ink-3 uppercase">
+              批注 · {annotations.length}
+            </h2>
+            {canEdit && (
+              <button
+                type="button"
+                onClick={() => setAnnotationFormOpen((v) => !v)}
+                aria-expanded={annotationFormOpen}
+                className="rounded-[3px] px-2 py-0.5 text-[0.72rem] font-semibold text-seal hover:bg-seal-wash"
+              >
+                {annotationFormOpen ? "取消" : "+ 批注"}
+              </button>
+            )}
+          </div>
+
+          {/* 创建批注（PRD D-05）：先选中正文再填写，锚点取当前选区。 */}
+          {canEdit && annotationFormOpen && (
+            <div className="mb-2.5 rounded-[6px] border border-line bg-surface-2 p-2">
+              <p className="mb-1.5 text-[0.72rem] leading-relaxed text-ink-3">
+                先在正文中选中一段文字，再在这里写下批注。
+              </p>
+              <textarea
+                value={annotationText}
+                onChange={(e) => setAnnotationText(e.target.value)}
+                rows={3}
+                maxLength={5000}
+                placeholder="你的批注…"
+                aria-label="批注内容"
+                className="w-full resize-y rounded-[4px] border border-line-strong bg-surface px-2 py-1.5 text-[0.8rem] focus:border-seal focus:outline-none"
+              />
+              <div className="mt-1.5 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => void handleCreateAnnotation()}
+                  disabled={annotationCreating}
+                  className="rounded-[4px] bg-seal px-2.5 py-1 text-[0.74rem] font-semibold text-paper hover:opacity-90 disabled:opacity-50"
+                >
+                  {annotationCreating ? "提交中…" : "添加批注"}
+                </button>
+              </div>
+            </div>
+          )}
+
           {loading ? (
             <Skeleton />
           ) : annotations.length === 0 ? (

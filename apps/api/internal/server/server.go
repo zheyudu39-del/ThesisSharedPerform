@@ -202,6 +202,10 @@ func New(d Deps) *http.Server {
 				// 论文全文挂载：上传只写 files 表，关联论文靠这个接口，
 				// 否则刷新后 pdfFileId 丢失、论文页又变回「还没有全文」。
 				r.Patch("/papers/{id}/pdf", papers.SetPDFFile)
+				// 元数据编辑与合并（P-02）：创建者或管理员可改；
+				// 合并会把重复论文的帖子/标签/策展项/文档引用一并迁移。
+				r.Patch("/papers/{id}", papers.Update)
+				r.Post("/papers/{id}/merge", papers.Merge)
 
 				// 信息流写操作在服务层事务中保证幂等。
 				r.Post("/posts", contents.CreatePost)

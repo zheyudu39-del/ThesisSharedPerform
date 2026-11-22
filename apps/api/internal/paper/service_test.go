@@ -37,6 +37,10 @@ type fakeQuerier struct {
 	arxivErr    error
 	dedupeErr   error
 	dedupePaper db.Paper
+
+	// 元数据编辑（P-02）
+	updateCalls int
+	lastUpdate  db.UpdatePaperMetadataParams
 }
 
 func (f *fakeQuerier) GetPaperByID(context.Context, pgtype.UUID) (db.Paper, error) {
@@ -341,5 +345,133 @@ func TestNormalizeArxiv(t *testing.T) {
 		if got := normalizeArxiv(input); got != want {
 			t.Fatalf("normalizeArxiv(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+/* -------------------------------------------------------------------------- */
+/* 元数据编辑与合并（P-02）                                                     */
+/* -------------------------------------------------------------------------- */
+
+func (f *fakeQuerier) UpdatePaperMetadata(_ context.Context, arg db.UpdatePaperMetadataParams) (db.Paper, error) {
+	f.updateCalls++
+	f.lastUpdate = arg
+	if f.updateErr != nil {
+		return db.Paper{}, f.updateErr
+	}
+	out := f.paper
+	if arg.Title != nil {
+		out.Title = *arg.Title
+	}
+	if arg.Authors != nil {
+		out.Authors = arg.Authors
+	}
+	if arg.TitleNorm != nil {
+		out.TitleNorm = *arg.TitleNorm
+	}
+	return out, nil
+}
+
+func TestUpdateMetadataRequiresEditor(t *testing.T) {
+	creator := uuid.Must(uuid.NewV7())
+	other := uuid.Must(uuid.NewV7())
+	paperID := uuid.Must(uuid.NewV7())
+
+	q := &fakeQuerier{
+		paper: db.Paper{ID: uuidOf(paperID), CreatedBy: uuidOf(creator)},
+		user:  db.User{ID: uuidOf(other), Role: db.UserRoleUser},
+	}
+	title := "Hijacked"
+	_, err := NewServiceWithQuerier(q, nil).UpdateMetadata(context.Background(), other, paperID, UpdateMetadataInput{
+		Title: &title,
+	})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+	if q.updateCalls != 0 {
+		t.Fatal("无权时不应写库")
+	}
+}
+
+func TestUpdateMetadataRejectsEmptyTitle(t *testing.T) {
+	creator := uuid.Must(uuid.NewV7())
+	paperID := uuid.Must(uuid.NewV7())
+	q := &fakeQuerier{paper: db.Paper{ID: uuidOf(paperID), CreatedBy: uuidOf(creator)}}
+
+	blank := "   "
+	_, err := NewServiceWithQuerier(q, nil).UpdateMetadata(context.Background(), creator, paperID, UpdateMetadataInput{
+		Title: &blank,
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("err = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestUpdateMetadataRecomputesDedupe 验证改标题后会重算归一化标题，
+// 否则手动补录的软去重仍指向旧标题，会重复建出第二篇。
+func TestUpdateMetadataRecomputesDedupe(t *testing.T) {
+	creator := uuid.Must(uuid.NewV7())
+	paperID := uuid.Must(uuid.NewV7())
+	q := &fakeQuerier{
+		paper: db.Paper{ID: uuidOf(paperID), CreatedBy: uuidOf(creator), Title: "Old Title"},
+	}
+	title := "Brand New Title"
+	_, err := NewServiceWithQuerier(q, nil).UpdateMetadata(context.Background(), creator, paperID, UpdateMetadataInput{
+		Title: &title,
+	})
+	if err != nil {
+		t.Fatalf("UpdateMetadata: %v", err)
+	}
+	if q.lastUpdate.TitleNorm == nil {
+		t.Fatal("改标题后必须重算 title_norm")
+	}
+	if *q.lastUpdate.TitleNorm != normalizeTitle("Brand New Title") {
+		t.Fatalf("title_norm = %q", *q.lastUpdate.TitleNorm)
+	}
+}
+
+func TestMergePapersRejectsSelf(t *testing.T) {
+	id := uuid.Must(uuid.NewV7())
+	_, err := NewServiceWithQuerier(&fakeQuerier{}, nil).MergePapers(context.Background(), uuid.Must(uuid.NewV7()), id, id)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("err = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestMergePapersRequiresPool 验证没有连接池时直接拒绝，
+// 而不是在没有事务保护的情况下执行跨表迁移。
+func TestMergePapersRequiresPool(t *testing.T) {
+	keep := uuid.Must(uuid.NewV7())
+	dup := uuid.Must(uuid.NewV7())
+	_, err := NewServiceWithQuerier(&fakeQuerier{}, nil).MergePapers(context.Background(), uuid.Must(uuid.NewV7()), keep, dup)
+	if err == nil {
+		t.Fatal("没有连接池时应当拒绝合并")
+	}
+}
+
+// TestRequireEditorAllowsCreator 验证创建者可以编辑自己的论文。
+func TestRequireEditorAllowsCreator(t *testing.T) {
+	creator := uuid.Must(uuid.NewV7())
+	q := &fakeQuerier{}
+	err := NewServiceWithQuerier(q, nil).requireEditor(context.Background(), db.Paper{
+		CreatedBy: uuidOf(creator),
+	}, creator)
+	if err != nil {
+		t.Fatalf("创建者应当有编辑权：%v", err)
+	}
+}
+
+// TestRequireEditorSystemPaperNeedsAdmin 验证系统导入的论文（created_by 为空）
+// 只有管理员能改。
+func TestRequireEditorSystemPaperNeedsAdmin(t *testing.T) {
+	user := uuid.Must(uuid.NewV7())
+	q := &fakeQuerier{user: db.User{ID: uuidOf(user), Role: db.UserRoleUser}}
+	err := NewServiceWithQuerier(q, nil).requireEditor(context.Background(), db.Paper{}, user)
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+
+	qAdmin := &fakeQuerier{user: db.User{ID: uuidOf(user), Role: db.UserRoleAdmin}}
+	if err := NewServiceWithQuerier(qAdmin, nil).requireEditor(context.Background(), db.Paper{}, user); err != nil {
+		t.Fatalf("管理员应当能改系统论文：%v", err)
 	}
 }

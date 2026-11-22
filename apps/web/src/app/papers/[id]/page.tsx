@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { PaperDiscussions } from "@/components/PaperDiscussions";
+import { PaperEditPanel } from "@/components/PaperEditPanel";
 import { PaperFileSection } from "@/components/PaperFileSection";
 import { SiteHeader } from "@/components/SiteHeader";
 import { fetchPaper } from "@/lib/server-api";
@@ -145,6 +146,8 @@ export default async function PaperDetailPage({ params }: PageProps) {
               </div>
             )}
           </dl>
+
+          <PaperEditPanel paper={paper} />
 
           <PaperFileSection paperId={paper.id} pdfFileId={paper.pdfFileId} />
 

@@ -274,7 +274,7 @@ export function DocumentWorkspace({
           用户写正文时切格式预览参考文献的频率远高于翻批注。
         */}
         <div className="flex flex-col gap-3">
-          <DocSidebar documentId={doc.id} canEdit={canEdit} />
+          <DocSidebar documentId={doc.id} canEdit={canEdit} editor={editor} />
           <ReferencePanel documentId={doc.id} canEdit={canEdit} />
         </div>
       </div>
