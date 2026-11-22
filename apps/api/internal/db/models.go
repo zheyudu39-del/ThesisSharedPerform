@@ -797,6 +797,18 @@ func AllVerifyTypeValues() []VerifyType {
 	}
 }
 
+type AdminAuditLog struct {
+	ID          pgtype.UUID        `json:"id"`
+	ActorID     pgtype.UUID        `json:"actor_id"`
+	ActorHandle string             `json:"actor_handle"`
+	Action      string             `json:"action"`
+	TargetType  string             `json:"target_type"`
+	TargetID    pgtype.UUID        `json:"target_id"`
+	TargetLabel *string            `json:"target_label"`
+	Detail      []byte             `json:"detail"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type Annotation struct {
 	ID         pgtype.UUID        `json:"id"`
 	TargetType string             `json:"target_type"`

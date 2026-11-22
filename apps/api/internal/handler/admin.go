@@ -135,6 +135,69 @@ func (h *AdminHandler) UpdateUserStatus(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"user": result})
 }
 
+type setUserVerifyRequest struct {
+	VerifyType string `json:"verifyType"`
+	VerifyOrg  string `json:"verifyOrg"`
+}
+
+// UpdateUserVerify 处理 PATCH /api/v1/admin/users/{id}/verify（A-05）。
+func (h *AdminHandler) UpdateUserVerify(w http.ResponseWriter, r *http.Request) {
+	userID, ok := adminUser(w, r)
+	if !ok {
+		return
+	}
+	targetID, ok := adminPathUUID(w, r, "id", "用户 ID")
+	if !ok {
+		return
+	}
+	var req setUserVerifyRequest
+	if !decodeRequest(w, r, &req) {
+		return
+	}
+	result, err := h.service.SetUserVerify(r.Context(), userID, targetID, admin.VerifyInput{
+		VerifyType: req.VerifyType,
+		VerifyOrg:  req.VerifyOrg,
+	})
+	if err != nil {
+		writeAdminError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": result})
+}
+
+// AuditLogs 处理 GET /api/v1/admin/audit-logs。
+func (h *AdminHandler) AuditLogs(w http.ResponseWriter, r *http.Request) {
+	userID, ok := adminUser(w, r)
+	if !ok {
+		return
+	}
+	limit, ok := adminQueryInt(w, r, "limit", 20, 1, 100)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	var actorID *uuid.UUID
+	if raw := q.Get("actorId"); raw != "" {
+		parsed, err := uuid.Parse(raw)
+		if err != nil {
+			WriteError(w, http.StatusUnprocessableEntity, "validation_error", "actorId 格式不正确")
+			return
+		}
+		actorID = &parsed
+	}
+	result, err := h.service.ListAuditLogs(r.Context(), userID, admin.AuditFilter{
+		ActionPrefix: q.Get("action"),
+		ActorID:      actorID,
+		Cursor:       q.Get("cursor"),
+		Limit:        int32(limit),
+	})
+	if err != nil {
+		writeAdminError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 /* -------------------------------------------------------------------------- */
 /* 内容                                                                       */
 /* -------------------------------------------------------------------------- */

@@ -35,6 +35,48 @@ func (q *Queries) AdminCountUsers(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+const adminCreateAuditLog = `-- name: AdminCreateAuditLog :one
+
+INSERT INTO admin_audit_logs (actor_id, actor_handle, action, target_type, target_id, target_label, detail)
+VALUES ($1, $2, $3,
+        $4, $5, $6,
+        $7)
+RETURNING id, created_at
+`
+
+type AdminCreateAuditLogParams struct {
+	ActorID     pgtype.UUID `json:"actor_id"`
+	ActorHandle string      `json:"actor_handle"`
+	Action      string      `json:"action"`
+	TargetType  string      `json:"target_type"`
+	TargetID    pgtype.UUID `json:"target_id"`
+	TargetLabel *string     `json:"target_label"`
+	Detail      []byte      `json:"detail"`
+}
+
+type AdminCreateAuditLogRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// ---------------------------------------------------------------------------
+// 审计日志
+// ---------------------------------------------------------------------------
+func (q *Queries) AdminCreateAuditLog(ctx context.Context, arg AdminCreateAuditLogParams) (AdminCreateAuditLogRow, error) {
+	row := q.db.QueryRow(ctx, adminCreateAuditLog,
+		arg.ActorID,
+		arg.ActorHandle,
+		arg.Action,
+		arg.TargetType,
+		arg.TargetID,
+		arg.TargetLabel,
+		arg.Detail,
+	)
+	var i AdminCreateAuditLogRow
+	err := row.Scan(&i.ID, &i.CreatedAt)
+	return i, err
+}
+
 const adminDailyActivity = `-- name: AdminDailyActivity :many
 WITH days AS (
     SELECT generate_series(
@@ -130,6 +172,30 @@ func (q *Queries) AdminFileStats(ctx context.Context) ([]AdminFileStatsRow, erro
 	return items, nil
 }
 
+const adminGetUserVerify = `-- name: AdminGetUserVerify :one
+SELECT id, handle, verify_type, verify_org FROM users
+WHERE id = $1 AND deleted_at IS NULL
+`
+
+type AdminGetUserVerifyRow struct {
+	ID         pgtype.UUID `json:"id"`
+	Handle     string      `json:"handle"`
+	VerifyType VerifyType  `json:"verify_type"`
+	VerifyOrg  *string     `json:"verify_org"`
+}
+
+func (q *Queries) AdminGetUserVerify(ctx context.Context, id pgtype.UUID) (AdminGetUserVerifyRow, error) {
+	row := q.db.QueryRow(ctx, adminGetUserVerify, id)
+	var i AdminGetUserVerifyRow
+	err := row.Scan(
+		&i.ID,
+		&i.Handle,
+		&i.VerifyType,
+		&i.VerifyOrg,
+	)
+	return i, err
+}
+
 const adminIsAdmin = `-- name: AdminIsAdmin :one
 SELECT role = 'admin' FROM users
 WHERE id = $1 AND deleted_at IS NULL
@@ -142,6 +208,63 @@ func (q *Queries) AdminIsAdmin(ctx context.Context, userID pgtype.UUID) (bool, e
 	var column_1 bool
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const adminListAuditLogs = `-- name: AdminListAuditLogs :many
+SELECT l.id, l.actor_id, l.actor_handle, l.action, l.target_type, l.target_id,
+       l.target_label, l.detail, l.created_at
+FROM admin_audit_logs l
+WHERE ($1::text IS NULL OR l.action LIKE $1::text)
+  AND ($2::uuid IS NULL OR l.actor_id = $2::uuid)
+  AND ($3::timestamptz IS NULL
+       OR (l.created_at, l.id) < ($3::timestamptz, $4::uuid))
+ORDER BY l.created_at DESC, l.id DESC
+LIMIT $5::int
+`
+
+type AdminListAuditLogsParams struct {
+	ActionPrefix *string            `json:"action_prefix"`
+	ActorID      pgtype.UUID        `json:"actor_id"`
+	CursorAt     pgtype.Timestamptz `json:"cursor_at"`
+	CursorID     pgtype.UUID        `json:"cursor_id"`
+	LimitCount   int32              `json:"limit_count"`
+}
+
+// 审计列表：按时间倒序，可按动作前缀与操作人筛选。
+func (q *Queries) AdminListAuditLogs(ctx context.Context, arg AdminListAuditLogsParams) ([]AdminAuditLog, error) {
+	rows, err := q.db.Query(ctx, adminListAuditLogs,
+		arg.ActionPrefix,
+		arg.ActorID,
+		arg.CursorAt,
+		arg.CursorID,
+		arg.LimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AdminAuditLog
+	for rows.Next() {
+		var i AdminAuditLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.ActorID,
+			&i.ActorHandle,
+			&i.Action,
+			&i.TargetType,
+			&i.TargetID,
+			&i.TargetLabel,
+			&i.Detail,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const adminListComments = `-- name: AdminListComments :many
@@ -554,7 +677,7 @@ func (q *Queries) AdminListPosts(ctx context.Context, arg AdminListPostsParams) 
 const adminListUsers = `-- name: AdminListUsers :many
 
 SELECT u.id, u.email, u.name, u.handle, u.role, u.status,
-       u.verify_type, u.institution, u.created_at, u.last_active_at,
+       u.verify_type, u.verify_org, u.institution, u.created_at, u.last_active_at,
        (SELECT count(*) FROM posts p WHERE p.author_id = u.id AND p.deleted_at IS NULL) AS post_count,
        (SELECT count(*) FROM follows f WHERE f.followee_id = u.id) AS follower_count
 FROM users u
@@ -588,6 +711,7 @@ type AdminListUsersRow struct {
 	Role          UserRole           `json:"role"`
 	Status        string             `json:"status"`
 	VerifyType    VerifyType         `json:"verify_type"`
+	VerifyOrg     *string            `json:"verify_org"`
 	Institution   *string            `json:"institution"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	LastActiveAt  pgtype.Timestamptz `json:"last_active_at"`
@@ -626,6 +750,7 @@ func (q *Queries) AdminListUsers(ctx context.Context, arg AdminListUsersParams) 
 			&i.Role,
 			&i.Status,
 			&i.VerifyType,
+			&i.VerifyOrg,
 			&i.Institution,
 			&i.CreatedAt,
 			&i.LastActiveAt,
@@ -833,6 +958,45 @@ func (q *Queries) AdminSetUserStatus(ctx context.Context, arg AdminSetUserStatus
 		&i.Handle,
 		&i.Role,
 		&i.Status,
+	)
+	return i, err
+}
+
+const adminSetUserVerify = `-- name: AdminSetUserVerify :one
+
+UPDATE users
+SET verify_type = $1::verify_type,
+    verify_org  = $2,
+    updated_at  = now()
+WHERE id = $3 AND deleted_at IS NULL
+RETURNING id, handle, verify_type, verify_org
+`
+
+type AdminSetUserVerifyParams struct {
+	VerifyType VerifyType  `json:"verify_type"`
+	VerifyOrg  *string     `json:"verify_org"`
+	ID         pgtype.UUID `json:"id"`
+}
+
+type AdminSetUserVerifyRow struct {
+	ID         pgtype.UUID `json:"id"`
+	Handle     string      `json:"handle"`
+	VerifyType VerifyType  `json:"verify_type"`
+	VerifyOrg  *string     `json:"verify_org"`
+}
+
+// ---------------------------------------------------------------------------
+// 认证（A-05 大V / 学者标识）
+// ---------------------------------------------------------------------------
+// 授予或收回认证标识。verify_org 只在有认证时有意义，收回时一并清空。
+func (q *Queries) AdminSetUserVerify(ctx context.Context, arg AdminSetUserVerifyParams) (AdminSetUserVerifyRow, error) {
+	row := q.db.QueryRow(ctx, adminSetUserVerify, arg.VerifyType, arg.VerifyOrg, arg.ID)
+	var i AdminSetUserVerifyRow
+	err := row.Scan(
+		&i.ID,
+		&i.Handle,
+		&i.VerifyType,
+		&i.VerifyOrg,
 	)
 	return i, err
 }

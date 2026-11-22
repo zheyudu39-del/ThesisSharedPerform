@@ -26,6 +26,7 @@ const NAV = [
   { href: "/admin/groups", label: "群组", hint: "群组管理" },
   { href: "/admin/files", label: "文件", hint: "上传与转码" },
   { href: "/admin/reports", label: "举报", hint: "审核队列" },
+  { href: "/admin/audit", label: "审计", hint: "操作记录" },
 ] as const;
 
 export function AdminShell({ children }: { children: React.ReactNode }) {

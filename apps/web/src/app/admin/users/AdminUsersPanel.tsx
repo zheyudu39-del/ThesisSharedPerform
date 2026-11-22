@@ -10,6 +10,7 @@ import {
 } from "@/lib/admin";
 import { ApiError } from "@/lib/http";
 import { useAuth } from "@/components/AuthProvider";
+import { VerifyDialog } from "@/app/admin/users/VerifyDialog";
 import {
   AdminEmpty,
   AdminError,
@@ -52,6 +53,8 @@ export function AdminUsersPanel() {
   const [error, setError] = useState<string | null>(null);
   const [actingId, setActingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // 认证弹窗的目标用户；null 表示关闭。
+  const [verifyTarget, setVerifyTarget] = useState<AdminUser | null>(null);
 
   const load = useCallback(
     async (next: string | null, append: boolean) => {
@@ -184,7 +187,7 @@ export function AdminUsersPanel() {
           <table className="w-full border-collapse text-left">
             <thead>
               <tr className="border-b border-line bg-surface-2">
-                {["账号", "角色", "状态", "内容", "注册时间", "操作"].map((h) => (
+                {["账号", "角色", "认证", "状态", "内容", "注册时间", "操作"].map((h) => (
                   <th
                     key={h}
                     className="px-3 py-2 font-mono text-[0.66rem] font-normal tracking-[0.06em] text-ink-3 uppercase"
@@ -217,6 +220,25 @@ export function AdminUsersPanel() {
                         label={u.role === "admin" ? "管理员" : "用户"}
                         tone={u.role === "admin" ? "seal" : "neutral"}
                       />
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {u.verifyType === "influencer" ? (
+                        <div className="flex flex-col gap-0.5">
+                          <Badge label="大V" tone="seal" />
+                          {u.verifyOrg && (
+                            <span className="font-mono text-[0.64rem] text-ink-3">{u.verifyOrg}</span>
+                          )}
+                        </div>
+                      ) : u.verifyType === "scholar" ? (
+                        <div className="flex flex-col gap-0.5">
+                          <Badge label="学者" tone="good" />
+                          {u.verifyOrg && (
+                            <span className="font-mono text-[0.64rem] text-ink-3">{u.verifyOrg}</span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="font-mono text-[0.68rem] text-ink-3">—</span>
+                      )}
                     </td>
                     <td className="px-3 py-2.5">
                       <Badge
@@ -254,6 +276,14 @@ export function AdminUsersPanel() {
                         >
                           {u.status === "active" ? "封禁" : "解封"}
                         </button>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => setVerifyTarget(u)}
+                          className="rounded-[4px] border border-seal/40 px-2 py-1 font-mono text-[0.68rem] text-seal hover:bg-seal-wash disabled:opacity-40"
+                        >
+                          认证
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -265,6 +295,19 @@ export function AdminUsersPanel() {
       )}
 
       <LoadMore cursor={cursor} loading={loadingMore} onClick={() => void load(cursor, true)} />
+
+      {verifyTarget && (
+        <VerifyDialog
+          user={verifyTarget}
+          onClose={() => setVerifyTarget(null)}
+          onSaved={(verifyType, verifyOrg) => {
+            setUsers((prev) =>
+              prev.map((u) => (u.id === verifyTarget.id ? { ...u, verifyType, verifyOrg } : u)),
+            );
+            setNotice(`@${verifyTarget.handle} 的认证已更新。`);
+          }}
+        />
+      )}
     </>
   );
 }

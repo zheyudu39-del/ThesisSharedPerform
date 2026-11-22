@@ -46,6 +46,22 @@ func (p *pgQuerier) AdminCountAdmins(ctx context.Context) (int64, error) {
 	return p.q.AdminCountAdmins(ctx)
 }
 
+func (p *pgQuerier) AdminGetUserVerify(ctx context.Context, id pgtype.UUID) (db.AdminGetUserVerifyRow, error) {
+	return p.q.AdminGetUserVerify(ctx, id)
+}
+
+func (p *pgQuerier) AdminSetUserVerify(ctx context.Context, arg db.AdminSetUserVerifyParams) (db.AdminSetUserVerifyRow, error) {
+	return p.q.AdminSetUserVerify(ctx, arg)
+}
+
+func (p *pgQuerier) AdminCreateAuditLog(ctx context.Context, arg db.AdminCreateAuditLogParams) (db.AdminCreateAuditLogRow, error) {
+	return p.q.AdminCreateAuditLog(ctx, arg)
+}
+
+func (p *pgQuerier) AdminListAuditLogs(ctx context.Context, arg db.AdminListAuditLogsParams) ([]db.AdminAuditLog, error) {
+	return p.q.AdminListAuditLogs(ctx, arg)
+}
+
 func (p *pgQuerier) AdminListPosts(ctx context.Context, arg db.AdminListPostsParams) ([]db.AdminListPostsRow, error) {
 	return p.q.AdminListPosts(ctx, arg)
 }

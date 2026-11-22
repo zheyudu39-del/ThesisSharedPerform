@@ -17,11 +17,14 @@ type fakeQuerier struct {
 	isAdmin    map[uuid.UUID]bool
 	adminCount int64
 	roleErr    error
+	auditErr   error
 
 	setRoleCalls   int
 	setStatusCalls int
+	setVerifyCalls int
 	deleteCalls    int
 	restoreCalls   int
+	auditCalls     int
 }
 
 func (f *fakeQuerier) IsAdmin(_ context.Context, id uuid.UUID) (bool, error) {
@@ -75,6 +78,25 @@ func (f *fakeQuerier) AdminListPapers(context.Context, db.AdminListPapersParams)
 	return nil, nil
 }
 func (f *fakeQuerier) AdminListComments(context.Context, db.AdminListCommentsParams) ([]db.AdminListCommentsRow, error) {
+	return nil, nil
+}
+func (f *fakeQuerier) AdminGetUserVerify(_ context.Context, id pgtype.UUID) (db.AdminGetUserVerifyRow, error) {
+	return db.AdminGetUserVerifyRow{ID: id, Handle: "target", VerifyType: db.VerifyTypeNone}, nil
+}
+func (f *fakeQuerier) AdminSetUserVerify(_ context.Context, arg db.AdminSetUserVerifyParams) (db.AdminSetUserVerifyRow, error) {
+	f.setVerifyCalls++
+	return db.AdminSetUserVerifyRow{
+		ID:         arg.ID,
+		Handle:     "target",
+		VerifyType: arg.VerifyType,
+		VerifyOrg:  arg.VerifyOrg,
+	}, nil
+}
+func (f *fakeQuerier) AdminCreateAuditLog(_ context.Context, arg db.AdminCreateAuditLogParams) (db.AdminCreateAuditLogRow, error) {
+	f.auditCalls++
+	return db.AdminCreateAuditLogRow{}, f.auditErr
+}
+func (f *fakeQuerier) AdminListAuditLogs(context.Context, db.AdminListAuditLogsParams) ([]db.AdminAuditLog, error) {
 	return nil, nil
 }
 func (f *fakeQuerier) AdminSoftDeleteComment(context.Context, pgtype.UUID) (pgtype.UUID, error) {
@@ -289,6 +311,143 @@ func TestEmptyCursorIsFirstPage(t *testing.T) {
 	}
 	if at.Valid || id.Valid {
 		t.Fatal("空游标应返回零值")
+	}
+}
+
+// TestSetUserVerifyGrantsInfluencer 授予大V标识应写入并记录审计。
+//
+// A-05 的关键链路：此前 verify_type 只有读、没有写，策展功能对普通用户
+// 永远不可用。这个测试锁住写入路径。
+func TestSetUserVerifyGrantsInfluencer(t *testing.T) {
+	f := &fakeQuerier{isAdmin: map[uuid.UUID]bool{adminID: true}}
+	s := newTestService(f)
+
+	got, err := s.SetUserVerify(context.Background(), adminID, targetID, VerifyInput{
+		VerifyType: VerifyInfluencer,
+		VerifyOrg:  "清华大学",
+	})
+	if err != nil {
+		t.Fatalf("授予认证失败：%v", err)
+	}
+	if got.VerifyType != VerifyInfluencer {
+		t.Fatalf("verifyType = %q，期望 influencer", got.VerifyType)
+	}
+	if got.VerifyOrg != "清华大学" {
+		t.Fatalf("verifyOrg = %q，期望「清华大学」", got.VerifyOrg)
+	}
+	if f.setVerifyCalls != 1 {
+		t.Fatalf("应写入一次，实际 %d", f.setVerifyCalls)
+	}
+	if f.auditCalls != 1 {
+		t.Fatalf("应写一条审计日志，实际 %d", f.auditCalls)
+	}
+}
+
+// TestSetUserVerifyRevokeClearsOrg 收回认证时必须清空机构，
+// 否则会残留「已认证」的误导信息。
+func TestSetUserVerifyRevokeClearsOrg(t *testing.T) {
+	f := &fakeQuerier{isAdmin: map[uuid.UUID]bool{adminID: true}}
+	s := newTestService(f)
+
+	got, err := s.SetUserVerify(context.Background(), adminID, targetID, VerifyInput{
+		VerifyType: VerifyNone,
+		VerifyOrg:  "清华大学",
+	})
+	if err != nil {
+		t.Fatalf("收回认证失败：%v", err)
+	}
+	if got.VerifyOrg != "" {
+		t.Fatalf("收回后 verifyOrg 应为空，实际 %q", got.VerifyOrg)
+	}
+}
+
+// TestSetUserVerifyRejectsInvalidType 认证类型白名单。
+func TestSetUserVerifyRejectsInvalidType(t *testing.T) {
+	f := &fakeQuerier{isAdmin: map[uuid.UUID]bool{adminID: true}}
+	s := newTestService(f)
+
+	if _, err := s.SetUserVerify(context.Background(), adminID, targetID, VerifyInput{
+		VerifyType: "vip",
+	}); !errors.Is(err, ErrValidation) {
+		t.Fatalf("非法认证类型应被拒绝，实际 %v", err)
+	}
+	if f.setVerifyCalls != 0 {
+		t.Fatal("被拒绝的请求不应写入")
+	}
+}
+
+// TestSetUserVerifyRequiresAdmin 非运营不能授予认证。
+func TestSetUserVerifyRequiresAdmin(t *testing.T) {
+	f := &fakeQuerier{isAdmin: map[uuid.UUID]bool{adminID: false}}
+	s := newTestService(f)
+
+	_, err := s.SetUserVerify(context.Background(), adminID, targetID, VerifyInput{
+		VerifyType: VerifyInfluencer,
+	})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("应返回 ErrForbidden，实际 %v", err)
+	}
+	if f.setVerifyCalls != 0 || f.auditCalls != 0 {
+		t.Fatal("鉴权失败时不应触达写查询")
+	}
+}
+
+// TestAuditWrittenOnRoleChange 改角色也要留痕。
+func TestAuditWrittenOnRoleChange(t *testing.T) {
+	f := &fakeQuerier{
+		isAdmin:    map[uuid.UUID]bool{adminID: true, targetID: true},
+		adminCount: 5,
+	}
+	s := newTestService(f)
+
+	if _, err := s.SetUserRole(context.Background(), adminID, targetID, "admin"); err != nil {
+		t.Fatalf("改角色失败：%v", err)
+	}
+	if f.auditCalls != 1 {
+		t.Fatalf("改角色应写审计日志，实际 %d 条", f.auditCalls)
+	}
+}
+
+// TestAuditFailureDoesNotBlockOperation 审计写失败不应让主操作报错。
+//
+// 审计是事后追责用的；因为它写不进去就回滚一个已生效的封禁，
+// 会让运营看到「失败」而实际状态已变，比缺日志更糟。
+func TestAuditFailureDoesNotBlockOperation(t *testing.T) {
+	f := &fakeQuerier{
+		isAdmin:    map[uuid.UUID]bool{adminID: true, targetID: true},
+		adminCount: 5,
+		auditErr:   errors.New("audit table unavailable"),
+	}
+	s := newTestService(f)
+
+	if _, err := s.SetUserVerify(context.Background(), adminID, targetID, VerifyInput{
+		VerifyType: VerifyScholar,
+	}); err != nil {
+		t.Fatalf("审计失败不应影响主操作，实际返回 %v", err)
+	}
+	if f.setVerifyCalls != 1 {
+		t.Fatal("主操作仍应完成")
+	}
+}
+
+// TestAuditActionPrefixRejectsWildcards 审计筛选的前缀不允许通配符，
+// 否则用户可以传 "%" 拉全量。
+func TestAuditActionPrefixRejectsWildcards(t *testing.T) {
+	f := &fakeQuerier{isAdmin: map[uuid.UUID]bool{adminID: true}}
+	s := newTestService(f)
+
+	for _, bad := range []string{"%", "user%", "user.", "a'b"} {
+		_, err := s.ListAuditLogs(context.Background(), adminID, AuditFilter{ActionPrefix: bad})
+		// 合法前缀（user.）不应报错，其余应被拒绝
+		if bad == "user." {
+			if err != nil {
+				t.Fatalf("合法前缀 %q 被拒绝：%v", bad, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrValidation) {
+			t.Fatalf("非法前缀 %q 应被拒绝，实际 %v", bad, err)
+		}
 	}
 }
 

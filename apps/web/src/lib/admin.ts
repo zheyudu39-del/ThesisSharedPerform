@@ -68,6 +68,8 @@ export type AdminUser = {
   role: string;
   status: string;
   verifyType: string;
+  /** 认证机构；verifyType 为 none 时为空。 */
+  verifyOrg: string;
   institution: string;
   postCount: number;
   followerCount: number;
@@ -205,6 +207,7 @@ function normalizeUser(v: unknown): AdminUser | null {
     role: str(v.role) || "user",
     status: str(v.status) || "active",
     verifyType: str(v.verifyType),
+    verifyOrg: str(v.verifyOrg),
     institution: str(v.institution),
     postCount: num(v.postCount),
     followerCount: num(v.followerCount),
@@ -297,6 +300,67 @@ export async function setAdminUserRole(id: string, role: "user" | "admin"): Prom
     method: "PATCH",
     body: { role },
   });
+}
+
+export type VerifyType = "none" | "scholar" | "influencer";
+
+/** 授予 / 收回认证标识（A-05）。收回时服务端会清空认证机构。 */
+export async function setAdminUserVerify(
+  id: string,
+  verifyType: VerifyType,
+  verifyOrg = "",
+): Promise<void> {
+  await apiFetch(`/admin/users/${encodeURIComponent(id)}/verify`, {
+    method: "PATCH",
+    body: { verifyType, verifyOrg },
+  });
+}
+
+export type AdminAuditLog = {
+  id: string;
+  actorId: string | null;
+  actorHandle: string;
+  action: string;
+  targetType: string;
+  targetId: string;
+  targetLabel: string;
+  detail: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type AdminAuditPage = { logs: AdminAuditLog[]; nextCursor: string | null };
+
+export type AuditQuery = {
+  action?: string;
+  actorId?: string;
+  cursor?: string | null;
+  limit?: number;
+};
+
+export async function listAdminAuditLogs(query: AuditQuery = {}): Promise<AdminAuditPage> {
+  const body = await apiFetch(
+    `/admin/audit-logs${buildQuery({
+      action: query.action,
+      actorId: query.actorId,
+      cursor: query.cursor,
+      limit: query.limit,
+    })}`,
+  );
+  if (!isRecord(body) || !Array.isArray(body.logs)) throw invalidResponse();
+  return {
+    logs: body.logs.filter(isRecord).map((l) => ({
+      id: str(l.id),
+      actorId: strOrNull(l.actorId),
+      actorHandle: str(l.actorHandle),
+      action: str(l.action),
+      targetType: str(l.targetType),
+      targetId: str(l.targetId),
+      targetLabel: str(l.targetLabel),
+      detail: isRecord(l.detail) ? l.detail : {},
+      createdAt: str(l.createdAt),
+    })),
+    nextCursor: nextCursorOf(body),
+  };
 }
 
 /** 封禁 / 解封。封禁立即生效，现有会话在下一次请求即失效。 */

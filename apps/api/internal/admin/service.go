@@ -11,8 +11,10 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -61,6 +63,12 @@ type Querier interface {
 	AdminSetUserRole(context.Context, db.AdminSetUserRoleParams) (db.AdminSetUserRoleRow, error)
 	AdminSetUserStatus(context.Context, db.AdminSetUserStatusParams) (db.AdminSetUserStatusRow, error)
 	AdminCountAdmins(context.Context) (int64, error)
+
+	AdminGetUserVerify(context.Context, pgtype.UUID) (db.AdminGetUserVerifyRow, error)
+	AdminSetUserVerify(context.Context, db.AdminSetUserVerifyParams) (db.AdminSetUserVerifyRow, error)
+
+	AdminCreateAuditLog(context.Context, db.AdminCreateAuditLogParams) (db.AdminCreateAuditLogRow, error)
+	AdminListAuditLogs(context.Context, db.AdminListAuditLogsParams) ([]db.AdminAuditLog, error)
 
 	AdminListPosts(context.Context, db.AdminListPostsParams) ([]db.AdminListPostsRow, error)
 	AdminSoftDeletePost(context.Context, pgtype.UUID) (db.AdminSoftDeletePostRow, error)
@@ -231,6 +239,8 @@ type UserItem struct {
 	Status        string     `json:"status"`
 	VerifyType    string     `json:"verifyType"`
 	Institution   string     `json:"institution"`
+	// VerifyOrg 是认证机构（仅 verifyType != none 时有意义）。
+	VerifyOrg string `json:"verifyOrg"`
 	PostCount     int64      `json:"postCount"`
 	FollowerCount int64      `json:"followerCount"`
 	CreatedAt     time.Time  `json:"createdAt"`
@@ -318,6 +328,7 @@ func (s *Service) ListUsers(ctx context.Context, actorID uuid.UUID, f UserFilter
 			Role:          string(r.Role),
 			Status:        r.Status,
 			VerifyType:    string(r.VerifyType),
+			VerifyOrg:     verifyOrgOf(r),
 			PostCount:     r.PostCount,
 			FollowerCount: r.FollowerCount,
 			CreatedAt:     r.CreatedAt.Time,
@@ -382,6 +393,13 @@ func (s *Service) SetUserRole(ctx context.Context, actorID, targetID uuid.UUID, 
 		}
 		return UserItem{}, fmt.Errorf("修改角色: %w", err)
 	}
+	s.audit(ctx, actorID, auditEntry{
+		Action:      "user.role",
+		TargetType:  "user",
+		TargetID:    targetID,
+		TargetLabel: row.Handle,
+		Detail:      map[string]any{"after": string(row.Role)},
+	})
 	return UserItem{
 		ID:     uuid.UUID(row.ID.Bytes),
 		Handle: row.Handle,
@@ -428,12 +446,278 @@ func (s *Service) SetUserStatus(ctx context.Context, actorID, targetID uuid.UUID
 		}
 		return UserItem{}, fmt.Errorf("修改状态: %w", err)
 	}
+	s.audit(ctx, actorID, auditEntry{
+		Action:      "user.status",
+		TargetType:  "user",
+		TargetID:    targetID,
+		TargetLabel: row.Handle,
+		Detail:      map[string]any{"after": row.Status},
+	})
 	return UserItem{
 		ID:     uuid.UUID(row.ID.Bytes),
 		Handle: row.Handle,
 		Role:   string(row.Role),
 		Status: row.Status,
 	}, nil
+}
+
+/* -------------------------------------------------------------------------- */
+/* 认证（A-05 大V / 学者）                                                    */
+/* -------------------------------------------------------------------------- */
+
+// 认证标识白名单。与 users.verify_type 枚举一一对应。
+const (
+	VerifyNone       = "none"
+	VerifyScholar    = "scholar"
+	VerifyInfluencer = "influencer"
+)
+
+// VerifyInput 是授予认证的入参。
+type VerifyInput struct {
+	VerifyType string
+	// VerifyOrg 是认证机构，仅 scholar / influencer 时有意义。
+	VerifyOrg string
+}
+
+// SetUserVerify 授予或收回认证标识。
+//
+// 产品背景：PRD 把「大V策展」定为核心机制，策展功能要求
+// verify_type='influencer'。但在本次改动之前，整个代码库只有读
+// verify_type 的地方，没有任何写入入口——精选流实际上只有管理员能维护。
+//
+// 收回（VerifyNone）时一并清空 verify_org：留着会让人误以为仍有认证关系。
+func (s *Service) SetUserVerify(ctx context.Context, actorID, targetID uuid.UUID, input VerifyInput) (UserItem, error) {
+	if err := s.requireAdmin(ctx, actorID); err != nil {
+		return UserItem{}, err
+	}
+	value := db.VerifyType(strings.TrimSpace(input.VerifyType))
+	if !value.Valid() {
+		return UserItem{}, fmt.Errorf("%w: verifyType 只能是 none、scholar 或 influencer", ErrValidation)
+	}
+	org := strings.TrimSpace(input.VerifyOrg)
+	if len([]rune(org)) > 128 {
+		return UserItem{}, fmt.Errorf("%w: 认证机构不能超过 128 个字符", ErrValidation)
+	}
+	if strings.ContainsRune(org, '�') {
+		return UserItem{}, fmt.Errorf("%w: 认证机构含有无法识别的字符", ErrValidation)
+	}
+
+	// 先取旧值，用于审计日志记录「改之前是什么」。
+	before, err := s.queries.AdminGetUserVerify(ctx, pgtype.UUID{Bytes: targetID, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return UserItem{}, ErrNotFound
+		}
+		return UserItem{}, fmt.Errorf("查询用户认证: %w", err)
+	}
+
+	var orgPtr *string
+	if value != db.VerifyTypeNone && org != "" {
+		orgPtr = &org
+	}
+
+	row, err := s.queries.AdminSetUserVerify(ctx, db.AdminSetUserVerifyParams{
+		VerifyType: value,
+		VerifyOrg:  orgPtr,
+		ID:         pgtype.UUID{Bytes: targetID, Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return UserItem{}, ErrNotFound
+		}
+		return UserItem{}, fmt.Errorf("修改认证: %w", err)
+	}
+
+	item := UserItem{
+		ID:         uuid.UUID(row.ID.Bytes),
+		Handle:     row.Handle,
+		VerifyType: string(row.VerifyType),
+	}
+	if row.VerifyOrg != nil {
+		item.VerifyOrg = *row.VerifyOrg
+	}
+
+	// 审计：记录前后值。写日志失败不影响主操作——认证已经生效，
+	// 因为日志写不进去就回滚，反而让运营以为操作失败了。
+	s.audit(ctx, actorID, auditEntry{
+		Action:      "user.verify",
+		TargetType:  "user",
+		TargetID:    targetID,
+		TargetLabel: row.Handle,
+		Detail: map[string]any{
+			"before": string(before.VerifyType),
+			"after":  string(row.VerifyType),
+			"org":    item.VerifyOrg,
+		},
+	})
+
+	return item, nil
+}
+
+/* -------------------------------------------------------------------------- */
+/* 审计日志                                                                   */
+/* -------------------------------------------------------------------------- */
+
+// auditEntry 是一次运营操作的审计上下文。
+type auditEntry struct {
+	Action      string
+	TargetType  string
+	TargetID    uuid.UUID
+	TargetLabel string
+	Detail      map[string]any
+}
+
+// audit 写一条审计记录。
+//
+// 失败只记日志、不向上抛：审计是「事后追责」用的，不应该因为它写不进去
+// 就回滚一个已经生效的管理操作——那会让运营看到「操作失败」，
+// 实际上封禁/认证却已经生效，状态更混乱。
+func (s *Service) audit(ctx context.Context, actorID uuid.UUID, e auditEntry) {
+	if s.queries == nil {
+		return
+	}
+	handle, err := s.actorHandle(ctx, actorID)
+	if err != nil {
+		// 连操作人都查不到时仍然写一条，用 ID 兜底：
+		// 有记录总比没有强，句柄缺失不影响追责。
+		handle = actorID.String()
+	}
+	detail, err := json.Marshal(e.Detail)
+	if err != nil {
+		detail = []byte("{}")
+	}
+	var label *string
+	if e.TargetLabel != "" {
+		label = &e.TargetLabel
+	}
+	if _, err := s.queries.AdminCreateAuditLog(ctx, db.AdminCreateAuditLogParams{
+		ActorID:     pgtype.UUID{Bytes: actorID, Valid: true},
+		ActorHandle: handle,
+		Action:      e.Action,
+		TargetType:  e.TargetType,
+		TargetID:    pgtype.UUID{Bytes: e.TargetID, Valid: true},
+		TargetLabel: label,
+		Detail:      detail,
+	}); err != nil {
+		slog.Warn("写入审计日志失败", "err", err, "action", e.Action, "target", e.TargetID)
+	}
+}
+
+// actorHandle 取操作人的句柄。Querier 没有单独的用户查询方法，
+// 复用 AdminListUsers 的搜索能力不划算，这里直接走审计表的兜底逻辑——
+// 句柄只用于展示，拿不到就用 ID。
+func (s *Service) actorHandle(ctx context.Context, actorID uuid.UUID) (string, error) {
+	// 通过「最后一名管理员」的查询拿不到句柄，改为在写日志时由 SQL 侧留空，
+	// 后续版本可加专用查询。当前实现用 ID 前缀作为可读兜底。
+	return actorID.String()[:8], nil
+}
+
+// AuditItem 是审计列表的一行。
+type AuditItem struct {
+	ID           uuid.UUID      `json:"id"`
+	ActorID      *uuid.UUID     `json:"actorId"`
+	ActorHandle  string         `json:"actorHandle"`
+	Action       string         `json:"action"`
+	TargetType   string         `json:"targetType"`
+	TargetID     uuid.UUID      `json:"targetId"`
+	TargetLabel  string         `json:"targetLabel"`
+	Detail       map[string]any `json:"detail"`
+	CreatedAt    time.Time      `json:"createdAt"`
+}
+
+// AuditPage 是审计列表的一页。
+type AuditPage struct {
+	Logs       []AuditItem `json:"logs"`
+	NextCursor *string     `json:"nextCursor"`
+}
+
+// AuditFilter 是审计列表的筛选条件。
+type AuditFilter struct {
+	// ActionPrefix 按动作前缀筛选，如 "user." 只看用户相关操作。
+	ActionPrefix string
+	ActorID      *uuid.UUID
+	Cursor       string
+	Limit        int32
+}
+
+// ListAuditLogs 返回审计日志。
+func (s *Service) ListAuditLogs(ctx context.Context, actorID uuid.UUID, f AuditFilter) (AuditPage, error) {
+	if err := s.requireAdmin(ctx, actorID); err != nil {
+		return AuditPage{}, err
+	}
+	limit := normalizeLimit(f.Limit)
+
+	var prefix *string
+	if raw := strings.TrimSpace(f.ActionPrefix); raw != "" {
+		if len(raw) > 64 {
+			return AuditPage{}, fmt.Errorf("%w: 动作前缀过长", ErrValidation)
+		}
+		// LIKE 模式里只允许字母、数字、点和下划线，避免用户输入通配符。
+		for _, r := range raw {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' ||
+				r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+				return AuditPage{}, fmt.Errorf("%w: 动作前缀只能包含字母、数字、点、下划线与连字符", ErrValidation)
+			}
+		}
+		pattern := raw + "%"
+		prefix = &pattern
+	}
+
+	// 参数是 pgtype.UUID 而非指针：NULL 用 Valid=false 表达，
+	// SQL 里再转成「不筛选」。
+	var actor pgtype.UUID
+	if f.ActorID != nil {
+		actor = pgtype.UUID{Bytes: *f.ActorID, Valid: true}
+	}
+
+	cursorAt, cursorID, err := decodeCursor(f.Cursor, "audit")
+	if err != nil {
+		return AuditPage{}, err
+	}
+
+	rows, err := s.queries.AdminListAuditLogs(ctx, db.AdminListAuditLogsParams{
+		ActionPrefix: prefix,
+		ActorID:      actor,
+		CursorAt:     cursorAt,
+		CursorID:     cursorID,
+		LimitCount:   limit,
+	})
+	if err != nil {
+		return AuditPage{}, fmt.Errorf("查询审计日志: %w", err)
+	}
+
+	logs := make([]AuditItem, 0, len(rows))
+	for _, r := range rows {
+		item := AuditItem{
+			ID:          uuid.UUID(r.ID.Bytes),
+			ActorHandle: r.ActorHandle,
+			Action:      r.Action,
+			TargetType:  r.TargetType,
+			TargetID:    uuid.UUID(r.TargetID.Bytes),
+			CreatedAt:   r.CreatedAt.Time,
+		}
+		if r.ActorID.Valid {
+			id := uuid.UUID(r.ActorID.Bytes)
+			item.ActorID = &id
+		}
+		if r.TargetLabel != nil {
+			item.TargetLabel = *r.TargetLabel
+		}
+		if len(r.Detail) > 0 {
+			_ = json.Unmarshal(r.Detail, &item.Detail)
+		}
+		if item.Detail == nil {
+			item.Detail = map[string]any{}
+		}
+		logs = append(logs, item)
+	}
+
+	var next *string
+	if len(rows) == int(limit) {
+		last := rows[len(rows)-1]
+		next = encodeCursor("audit", last.CreatedAt.Time, uuid.UUID(last.ID.Bytes))
+	}
+	return AuditPage{Logs: logs, NextCursor: next}, nil
 }
 
 // userRoleOf 查目标用户的当前角色，用于「最后一名管理员」判定。
@@ -571,6 +855,11 @@ func (s *Service) DeletePost(ctx context.Context, actorID, postID uuid.UUID) err
 		}
 		return fmt.Errorf("删除帖子: %w", err)
 	}
+	s.audit(ctx, actorID, auditEntry{
+		Action:     "post.delete",
+		TargetType: "post",
+		TargetID:   postID,
+	})
 	return nil
 }
 
@@ -586,6 +875,11 @@ func (s *Service) RestorePost(ctx context.Context, actorID, postID uuid.UUID) er
 		}
 		return fmt.Errorf("恢复帖子: %w", err)
 	}
+	s.audit(ctx, actorID, auditEntry{
+		Action:     "post.restore",
+		TargetType: "post",
+		TargetID:   postID,
+	})
 	return nil
 }
 
@@ -763,6 +1057,11 @@ func (s *Service) DeleteComment(ctx context.Context, actorID, commentID uuid.UUI
 		}
 		return fmt.Errorf("删除评论: %w", err)
 	}
+	s.audit(ctx, actorID, auditEntry{
+		Action:     "comment.delete",
+		TargetType: "comment",
+		TargetID:   commentID,
+	})
 	return nil
 }
 
@@ -778,6 +1077,11 @@ func (s *Service) RestoreComment(ctx context.Context, actorID, commentID uuid.UU
 		}
 		return fmt.Errorf("恢复评论: %w", err)
 	}
+	s.audit(ctx, actorID, auditEntry{
+		Action:     "comment.restore",
+		TargetType: "comment",
+		TargetID:   commentID,
+	})
 	return nil
 }
 
@@ -873,6 +1177,11 @@ func (s *Service) DeleteGroup(ctx context.Context, actorID, groupID uuid.UUID) e
 		}
 		return fmt.Errorf("删除群组: %w", err)
 	}
+	s.audit(ctx, actorID, auditEntry{
+		Action:     "group.delete",
+		TargetType: "group",
+		TargetID:   groupID,
+	})
 	return nil
 }
 
@@ -888,6 +1197,11 @@ func (s *Service) RestoreGroup(ctx context.Context, actorID, groupID uuid.UUID) 
 		}
 		return fmt.Errorf("恢复群组: %w", err)
 	}
+	s.audit(ctx, actorID, auditEntry{
+		Action:     "group.restore",
+		TargetType: "group",
+		TargetID:   groupID,
+	})
 	return nil
 }
 
@@ -1043,6 +1357,14 @@ func (s *Service) requireAdmin(ctx context.Context, userID uuid.UUID) error {
 		return ErrForbidden
 	}
 	return nil
+}
+
+// verifyOrgOf 从用户列表行里取认证机构。
+func verifyOrgOf(r db.AdminListUsersRow) string {
+	if r.VerifyOrg != nil {
+		return *r.VerifyOrg
+	}
+	return ""
 }
 
 func normalizeLimit(limit int32) int32 {

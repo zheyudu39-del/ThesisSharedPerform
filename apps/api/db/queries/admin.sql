@@ -80,7 +80,7 @@ LIMIT sqlc.arg('limit_count')::int;
 -- 搜索用 ILIKE 而不是全文索引：后台是运营小流量场景，数据量在十万级以内，
 -- 配合 trigram 索引（若已建）足够；引入 tsvector 只会增加维护成本。
 SELECT u.id, u.email, u.name, u.handle, u.role, u.status,
-       u.verify_type, u.institution, u.created_at, u.last_active_at,
+       u.verify_type, u.verify_org, u.institution, u.created_at, u.last_active_at,
        (SELECT count(*) FROM posts p WHERE p.author_id = u.id AND p.deleted_at IS NULL) AS post_count,
        (SELECT count(*) FROM follows f WHERE f.followee_id = u.id) AS follower_count
 FROM users u
@@ -265,3 +265,43 @@ WITH target AS (
 UPDATE posts SET comment_count = posts.comment_count + 1, updated_at = now()
 WHERE posts.id = (SELECT post_id FROM target)
 RETURNING posts.id;
+
+-- ---------------------------------------------------------------------------
+-- 认证（A-05 大V / 学者标识）
+-- ---------------------------------------------------------------------------
+
+-- name: AdminSetUserVerify :one
+-- 授予或收回认证标识。verify_org 只在有认证时有意义，收回时一并清空。
+UPDATE users
+SET verify_type = sqlc.arg('verify_type')::verify_type,
+    verify_org  = sqlc.narg('verify_org'),
+    updated_at  = now()
+WHERE id = sqlc.arg('id') AND deleted_at IS NULL
+RETURNING id, handle, verify_type, verify_org;
+
+-- name: AdminGetUserVerify :one
+SELECT id, handle, verify_type, verify_org FROM users
+WHERE id = sqlc.arg('id') AND deleted_at IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- 审计日志
+-- ---------------------------------------------------------------------------
+
+-- name: AdminCreateAuditLog :one
+INSERT INTO admin_audit_logs (actor_id, actor_handle, action, target_type, target_id, target_label, detail)
+VALUES (sqlc.arg('actor_id'), sqlc.arg('actor_handle'), sqlc.arg('action'),
+        sqlc.arg('target_type'), sqlc.arg('target_id'), sqlc.narg('target_label'),
+        sqlc.arg('detail'))
+RETURNING id, created_at;
+
+-- name: AdminListAuditLogs :many
+-- 审计列表：按时间倒序，可按动作前缀与操作人筛选。
+SELECT l.id, l.actor_id, l.actor_handle, l.action, l.target_type, l.target_id,
+       l.target_label, l.detail, l.created_at
+FROM admin_audit_logs l
+WHERE (sqlc.narg('action_prefix')::text IS NULL OR l.action LIKE sqlc.narg('action_prefix')::text)
+  AND (sqlc.narg('actor_id')::uuid IS NULL OR l.actor_id = sqlc.narg('actor_id')::uuid)
+  AND (sqlc.narg('cursor_at')::timestamptz IS NULL
+       OR (l.created_at, l.id) < (sqlc.narg('cursor_at')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY l.created_at DESC, l.id DESC
+LIMIT sqlc.arg('limit_count')::int;

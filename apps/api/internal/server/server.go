@@ -172,6 +172,7 @@ func New(d Deps) *http.Server {
 				r.Get("/comments", admins.Comments)
 				r.Get("/groups", admins.Groups)
 				r.Get("/files", admins.Files)
+				r.Get("/audit-logs", admins.AuditLogs)
 			})
 
 			// 开放 API 密钥只读：只返回元数据（前缀、scopes、最后使用时间），
@@ -255,6 +256,7 @@ func New(d Deps) *http.Server {
 				// 且服务层会再次确认调用者是运营。
 				r.Patch("/admin/users/{id}/role", admins.UpdateUserRole)
 				r.Patch("/admin/users/{id}/status", admins.UpdateUserStatus)
+				r.Patch("/admin/users/{id}/verify", admins.UpdateUserVerify)
 				r.Delete("/admin/posts/{id}", admins.DeletePost)
 				r.Post("/admin/posts/{id}/restore", admins.RestorePost)
 				r.Delete("/admin/comments/{id}", admins.DeleteComment)
