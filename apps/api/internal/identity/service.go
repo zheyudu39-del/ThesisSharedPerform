@@ -241,6 +241,30 @@ func (s *Service) GetByID(ctx context.Context, userID uuid.UUID) (User, error) {
 	return userFromDB(record), nil
 }
 
+// hasReplacementChar 的判断理由：
+//
+// 客户端若把 GBK 字节按 UTF-8 解码，非法字节会变成 U+FFFD 并「成功」提交——
+// Go 的 json 解码只校验 UTF-8 结构，U+FFFD 本身是合法字符。这样的值一旦落库
+// 就永久损坏：原字节已经丢失，后台无法还原，前端只能显示一串乱码。
+// 宁可在入口拒绝，也不要存进一个修不好的值。
+
+// hasReplacementChar 判断字符串里是否含 U+FFFD。
+//
+// 只拦 U+FFFD 而不做全量「是否合法 UTF-8」检查：Go 的 string 若含非法字节，
+// json.Unmarshal 已经会报错，能走到这里的一定是合法 UTF-8。真正会漏进来的
+// 是解码阶段被替换掉的字符。
+func hasReplacementChar(s string) bool {
+	return strings.ContainsRune(s, utf8.RuneError)
+}
+
+// validateText 校验用户输入的自由文本。label 用于拼接可读的错误信息。
+func validateText(label, value string) error {
+	if hasReplacementChar(value) {
+		return fmt.Errorf("%w: %s 含有无法识别的字符，请检查输入法或编码后重试", ValidationError, label)
+	}
+	return nil
+}
+
 func validateRegister(input RegisterInput) error {
 	address, err := mail.ParseAddress(input.Email)
 	if err != nil || address.Address != input.Email || !strings.Contains(input.Email, "@") {
@@ -251,6 +275,9 @@ func validateRegister(input RegisterInput) error {
 	}
 	if len(input.Password) > 128 {
 		return fmt.Errorf("%w: 密码不能超过 128 位", ValidationError)
+	}
+	if err := validateText("显示名", input.Name); err != nil {
+		return err
 	}
 	if n := utf8.RuneCountInString(input.Name); n < 1 || n > 64 {
 		return fmt.Errorf("%w: 显示名长度须为 1 到 64 个字符", ValidationError)
@@ -439,6 +466,9 @@ func buildUpdateProfileParams(userID uuid.UUID, input UpdateProfileInput) (db.Up
 	params := db.UpdateUserProfileParams{ID: uuidParam(userID)}
 	if input.Name != nil {
 		name := strings.TrimSpace(*input.Name)
+		if err := validateText("显示名", name); err != nil {
+			return db.UpdateUserProfileParams{}, err
+		}
 		if n := utf8.RuneCountInString(name); n < 1 || n > 64 {
 			return db.UpdateUserProfileParams{}, fmt.Errorf("%w: 显示名长度须为 1 到 64 个字符", ValidationError)
 		}
@@ -446,6 +476,9 @@ func buildUpdateProfileParams(userID uuid.UUID, input UpdateProfileInput) (db.Up
 	}
 	if input.Bio != nil {
 		bio := strings.TrimSpace(*input.Bio)
+		if err := validateText("简介", bio); err != nil {
+			return db.UpdateUserProfileParams{}, err
+		}
 		if utf8.RuneCountInString(bio) > 280 {
 			return db.UpdateUserProfileParams{}, fmt.Errorf("%w: 简介不能超过 280 个字符", ValidationError)
 		}

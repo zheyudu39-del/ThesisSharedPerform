@@ -160,6 +160,9 @@ func (s *Service) CreateManual(ctx context.Context, createdBy uuid.UUID, input C
 	if title == "" {
 		return ResolveResult{}, fmt.Errorf("%w: 标题不能为空", ErrInvalidInput)
 	}
+	if strings.ContainsRune(title, utf8.RuneError) {
+		return ResolveResult{}, fmt.Errorf("%w: 标题含有无法识别的字符，请检查输入后重试", ErrInvalidInput)
+	}
 	if utf8.RuneCountInString(title) > 512 {
 		return ResolveResult{}, fmt.Errorf("%w: 标题不能超过 512 个字符", ErrInvalidInput)
 	}
@@ -364,6 +367,9 @@ func (s *Service) UpdateMetadata(ctx context.Context, userID, paperID uuid.UUID,
 		title := strings.TrimSpace(*input.Title)
 		if title == "" {
 			return Paper{}, fmt.Errorf("%w: 标题不能为空", ErrInvalidInput)
+		}
+		if strings.ContainsRune(title, utf8.RuneError) {
+			return Paper{}, fmt.Errorf("%w: 标题含有无法识别的字符，请检查输入后重试", ErrInvalidInput)
 		}
 		if utf8.RuneCountInString(title) > 512 {
 			return Paper{}, fmt.Errorf("%w: 标题不能超过 512 个字符", ErrInvalidInput)

@@ -406,6 +406,11 @@ func stringValue(value *string) string {
 // CreatePost 在一个事务中创建帖子、关联标签并增加原帖转发计数。
 func (s *Service) CreatePost(ctx context.Context, authorID uuid.UUID, input CreatePostInput) (Post, error) {
 	input.Content = strings.TrimSpace(input.Content)
+	// 含 U+FFFD 说明客户端把字节按错误的编码解码过：原文已经丢了，
+	// 存进去只会让这条帖子永久显示为乱码。入口直接拒绝，让用户重发。
+	if strings.ContainsRune(input.Content, utf8.RuneError) {
+		return Post{}, fmt.Errorf("%w: 正文含有无法识别的字符，请检查输入后重试", ErrValidation)
+	}
 	if utf8.RuneCountInString(input.Content) > 5000 || (input.Content == "" && input.RepostOf == nil) {
 		return Post{}, fmt.Errorf("%w: 正文与转发目标不能同时为空，且正文不能超过 5000 字符", ErrValidation)
 	}
@@ -1019,6 +1024,9 @@ func (s *Service) Bookmarks(ctx context.Context, userID uuid.UUID, rawCursor str
 
 func (s *Service) CreateComment(ctx context.Context, userID, postID uuid.UUID, content string, parentID *uuid.UUID) (Comment, error) {
 	content = strings.TrimSpace(content)
+	if strings.ContainsRune(content, utf8.RuneError) {
+		return Comment{}, fmt.Errorf("%w: 评论含有无法识别的字符，请检查输入后重试", ErrValidation)
+	}
 	if content == "" || utf8.RuneCountInString(content) > 5000 {
 		return Comment{}, fmt.Errorf("%w: 评论须为 1 到 5000 字符", ErrValidation)
 	}
