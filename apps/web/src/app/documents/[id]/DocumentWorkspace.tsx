@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import type { Editor } from "@tiptap/react";
 import { useAuth } from "@/components/AuthProvider";
 import { DocumentEditor } from "@/components/DocumentEditor";
+import { DocOutline } from "@/components/DocOutline";
 import { DocSidebar } from "@/components/DocSidebar";
 import { ReferencePanel } from "@/components/ReferencePanel";
 import {
@@ -274,6 +275,9 @@ export function DocumentWorkspace({
           用户写正文时切格式预览参考文献的频率远高于翻批注。
         */}
         <div className="flex flex-col gap-3">
+          {/* 大纲常驻顶部：写作时要一直看得到文章结构，
+              塞进 Tab 里就得来回切换。 */}
+          <DocOutline editor={editor} />
           <DocSidebar documentId={doc.id} canEdit={canEdit} editor={editor} />
           <ReferencePanel documentId={doc.id} canEdit={canEdit} />
         </div>

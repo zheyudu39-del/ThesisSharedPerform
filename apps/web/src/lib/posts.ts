@@ -361,6 +361,46 @@ export async function getAuthorPosts(
  *
  * 只包含公开且不属于任何群组的帖子——群内讨论不对外展示。
  */
+/** 话题标签（PRD F-07）。 */
+export type TagDTO = {
+  name: string;
+  slug: string;
+  postCount: number;
+};
+
+/** 热门标签列表，按公开帖子数排序。 */
+export async function listTopTags(limit = 30): Promise<TagDTO[]> {
+  const body = await apiFetch(`/tags?limit=${limit}`);
+  if (!isRecord(body) || !Array.isArray(body.tags)) return [];
+  return body.tags.filter(isRecord).map((t) => ({
+    name: str(t.name),
+    slug: str(t.slug),
+    postCount: typeof t.postCount === "number" ? t.postCount : 0,
+  }));
+}
+
+/** 标签详情（含公开帖子数）。不存在时抛 ApiError(404)。 */
+export async function getTag(slug: string): Promise<TagDTO> {
+  const body = await apiFetch(`/tags/${encodeURIComponent(slug)}`);
+  if (!isRecord(body) || !isRecord(body.tag)) throw invalidResponse();
+  const t = body.tag;
+  return { name: str(t.name), slug: str(t.slug), postCount: typeof t.postCount === "number" ? t.postCount : 0 };
+}
+
+/** 某标签下的公开帖子，游标分页。 */
+export async function getTagPosts(
+  slug: string,
+  cursor: string | null = null,
+  limit = 20,
+): Promise<FeedPage> {
+  const params = new URLSearchParams({ limit: String(Math.min(Math.max(limit, 1), 50)) });
+  if (cursor) params.set("cursor", cursor);
+  const body = await apiFetch(
+    `/tags/${encodeURIComponent(slug)}/posts?${params.toString()}`,
+  );
+  return normalizePostList(body);
+}
+
 export async function getPaperPosts(
   paperId: string,
   cursor: string | null = null,

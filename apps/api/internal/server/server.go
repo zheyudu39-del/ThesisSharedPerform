@@ -340,6 +340,12 @@ func New(d Deps) *http.Server {
 		// 论文详情页的「相关讨论」（P-03）。公开可读，与论文本身一致。
 		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/papers/{id}/posts", contents.PaperPosts)
 
+		// 话题标签（F-07）：标签列表、标签详情与话题页帖子。
+		// 公开可读——话题页本身就是给搜索引擎与分享链接用的。
+		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/tags", contents.TopTags)
+		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/tags/{slug}", contents.Tag)
+		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/tags/{slug}/posts", contents.TagPosts)
+
 		// 文件读取：论文全文预览必须对访客可见（PRD V-01 / P-05）。
 		// 挂在 OptionalAuthenticate 下而不是 Authenticate：论文是公开内容，
 		// 要求登录才能看预览等于把论文页做成了登录墙。可读性由服务层判定

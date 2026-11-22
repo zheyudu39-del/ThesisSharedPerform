@@ -157,6 +157,48 @@ func (h *ContentHandler) PaperPosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// Tag 处理 GET /api/v1/tags/{slug}，返回标签详情与公开帖子数（PRD F-07）。
+func (h *ContentHandler) Tag(w http.ResponseWriter, r *http.Request) {
+	tag, err := h.service.GetTag(r.Context(), chi.URLParam(r, "slug"))
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tag": tag})
+}
+
+// TagPosts 处理 GET /api/v1/tags/{slug}/posts，话题页的帖子列表。
+func (h *ContentHandler) TagPosts(w http.ResponseWriter, r *http.Request) {
+	viewerID, _ := appmiddleware.UserID(r.Context())
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.TagPosts(
+		r.Context(), viewerID, chi.URLParam(r, "slug"),
+		r.URL.Query().Get("cursor"), limit,
+	)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// TopTags 处理 GET /api/v1/tags，按公开帖子数排序的热门标签。
+func (h *ContentHandler) TopTags(w http.ResponseWriter, r *http.Request) {
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
+	}
+	tags, err := h.service.TopTags(r.Context(), limit)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tags": tags})
+}
+
 func (h *ContentHandler) Like(w http.ResponseWriter, r *http.Request)   { h.setLike(w, r, true) }
 func (h *ContentHandler) Unlike(w http.ResponseWriter, r *http.Request) { h.setLike(w, r, false) }
 func (h *ContentHandler) setLike(w http.ResponseWriter, r *http.Request, liked bool) {

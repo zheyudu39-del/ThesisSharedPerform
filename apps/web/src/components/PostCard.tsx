@@ -535,10 +535,15 @@ export function PostCard({ post, onPatch, onDeleted, detail = false, groupSlug }
       {post.tags.length > 0 && (
         <div className="mb-3 flex flex-wrap gap-2">
           {post.tags.map((t) => (
-            <span key={t} className="rounded-full bg-surface-2 px-3 py-1 text-[0.78rem] text-ink-2">
+            // 标签可点击进入话题页（PRD F-07）。此前只是不可交互的文字。
+            <Link
+              key={t}
+              href={`/tags/${encodeURIComponent(t.toLowerCase())}`}
+              className="rounded-full bg-surface-2 px-3 py-1 text-[0.78rem] text-ink-2 transition-colors hover:bg-seal-wash hover:text-seal"
+            >
               <span className="font-mono text-seal">#</span>
               {t}
-            </span>
+            </Link>
           ))}
         </div>
       )}

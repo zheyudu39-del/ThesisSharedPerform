@@ -353,6 +353,41 @@ func (q *Queries) GetPostForWrite(ctx context.Context, arg GetPostForWriteParams
 	return id, err
 }
 
+const getTagBySlug = `-- name: GetTagBySlug :one
+SELECT t.id, t.name, t.slug, t.created_at,
+       (SELECT count(*) FROM post_tags pt
+          JOIN posts p ON p.id = pt.post_id
+         WHERE pt.tag_id = t.id
+           AND p.deleted_at IS NULL
+           AND p.visibility = 'public'
+           AND p.group_id IS NULL)::bigint AS post_count
+FROM tags t
+WHERE t.slug = $1::varchar(64)
+`
+
+type GetTagBySlugRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Name      string             `json:"name"`
+	Slug      string             `json:"slug"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	PostCount int64              `json:"post_count"`
+}
+
+// 标签详情页用。use_count 实时统计，不依赖可能失真的计数器列——
+// tags.use_count 建表以来从未被维护过，一直是 0。
+func (q *Queries) GetTagBySlug(ctx context.Context, slug string) (GetTagBySlugRow, error) {
+	row := q.db.QueryRow(ctx, getTagBySlug, slug)
+	var i GetTagBySlugRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Slug,
+		&i.CreatedAt,
+		&i.PostCount,
+	)
+	return i, err
+}
+
 const incrementRepostCount = `-- name: IncrementRepostCount :exec
 UPDATE posts SET repost_count = repost_count + 1, updated_at = now()
 WHERE id = $1 AND deleted_at IS NULL
@@ -1530,6 +1565,228 @@ func (q *Queries) ListPostAttachments(ctx context.Context, postID pgtype.UUID) (
 			&i.PageCount,
 			&i.Position,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPostsByTag = `-- name: ListPostsByTag :many
+SELECT p.id, p.author_id, p.type, p.content_html, p.content_text, p.paper_id, p.repost_of, p.group_id, p.visibility, p.like_count, p.comment_count, p.repost_count, p.hot_score, p.created_at, p.updated_at, p.deleted_at, u.name AS author_name, u.handle AS author_handle, u.verify_type AS author_verify_type,
+       EXISTS(SELECT 1 FROM reactions r WHERE r.user_id = $1::uuid AND r.target_type = 'post' AND r.target_id = p.id AND r.kind = 'like') AS liked,
+       EXISTS(SELECT 1 FROM reactions r WHERE r.user_id = $1::uuid AND r.target_type = 'post' AND r.target_id = p.id AND r.kind = 'bookmark') AS bookmarked,
+       COALESCE((SELECT array_agg(t2.name ORDER BY t2.name) FROM post_tags pt2 JOIN tags t2 ON t2.id = pt2.tag_id WHERE pt2.post_id = p.id), '{}') AS tags,
+       op.id AS paper_id_value, op.doi AS paper_doi, op.arxiv_id AS paper_arxiv_id, op.openreview_id AS paper_openreview_id,
+       op.title AS paper_title, op.authors AS paper_authors, op.abstract AS paper_abstract, op.venue AS paper_venue,
+       op.published_at AS paper_published_at, op.citation_count AS paper_citation_count, op.meta_source AS paper_meta_source, op.created_at AS paper_created_at,
+       rp.id AS repost_id, ru.name AS repost_author_name, rp.content_text AS repost_content_text,
+       rpp.id AS repost_paper_id, rpp.doi AS repost_paper_doi, rpp.arxiv_id AS repost_paper_arxiv_id, rpp.openreview_id AS repost_paper_openreview_id,
+       rpp.title AS repost_paper_title, rpp.authors AS repost_paper_authors, rpp.abstract AS repost_paper_abstract, rpp.venue AS repost_paper_venue,
+       rpp.published_at AS repost_paper_published_at, rpp.citation_count AS repost_paper_citation_count, rpp.meta_source AS repost_paper_meta_source, rpp.created_at AS repost_paper_created_at
+FROM posts p
+JOIN users u ON u.id = p.author_id
+JOIN post_tags pt ON pt.post_id = p.id
+JOIN tags t ON t.id = pt.tag_id
+LEFT JOIN papers op ON op.id = p.paper_id
+LEFT JOIN posts rp ON rp.id = p.repost_of AND rp.deleted_at IS NULL
+    AND (
+      rp.author_id = $1::uuid
+      OR rp.visibility = 'public'
+      OR (rp.visibility = 'followers'
+          AND EXISTS(SELECT 1 FROM follows rf WHERE rf.follower_id = $1::uuid AND rf.followee_id = rp.author_id))
+    )
+LEFT JOIN users ru ON ru.id = rp.author_id
+LEFT JOIN papers rpp ON rpp.id = rp.paper_id
+WHERE p.deleted_at IS NULL
+  AND t.slug = $2::varchar(64)
+  AND p.visibility = 'public'
+  AND p.group_id IS NULL
+  AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.blocker_id = $1::uuid AND b.blocked_id = p.author_id)
+  AND ($3::timestamptz IS NULL OR (p.created_at, p.id) < ($3::timestamptz, $4::uuid))
+ORDER BY p.created_at DESC, p.id DESC
+LIMIT $5
+`
+
+type ListPostsByTagParams struct {
+	ViewerID   pgtype.UUID        `json:"viewer_id"`
+	Slug       string             `json:"slug"`
+	CursorTime pgtype.Timestamptz `json:"cursor_time"`
+	CursorID   pgtype.UUID        `json:"cursor_id"`
+	PageLimit  int32              `json:"page_limit"`
+}
+
+type ListPostsByTagRow struct {
+	ID                       pgtype.UUID        `json:"id"`
+	AuthorID                 pgtype.UUID        `json:"author_id"`
+	Type                     PostType           `json:"type"`
+	ContentHtml              *string            `json:"content_html"`
+	ContentText              *string            `json:"content_text"`
+	PaperID                  pgtype.UUID        `json:"paper_id"`
+	RepostOf                 pgtype.UUID        `json:"repost_of"`
+	GroupID                  pgtype.UUID        `json:"group_id"`
+	Visibility               PostVisibility     `json:"visibility"`
+	LikeCount                int32              `json:"like_count"`
+	CommentCount             int32              `json:"comment_count"`
+	RepostCount              int32              `json:"repost_count"`
+	HotScore                 float32            `json:"hot_score"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                pgtype.Timestamptz `json:"updated_at"`
+	DeletedAt                pgtype.Timestamptz `json:"deleted_at"`
+	AuthorName               string             `json:"author_name"`
+	AuthorHandle             string             `json:"author_handle"`
+	AuthorVerifyType         VerifyType         `json:"author_verify_type"`
+	Liked                    bool               `json:"liked"`
+	Bookmarked               bool               `json:"bookmarked"`
+	Tags                     interface{}        `json:"tags"`
+	PaperIDValue             pgtype.UUID        `json:"paper_id_value"`
+	PaperDoi                 *string            `json:"paper_doi"`
+	PaperArxivID             *string            `json:"paper_arxiv_id"`
+	PaperOpenreviewID        *string            `json:"paper_openreview_id"`
+	PaperTitle               *string            `json:"paper_title"`
+	PaperAuthors             []byte             `json:"paper_authors"`
+	PaperAbstract            *string            `json:"paper_abstract"`
+	PaperVenue               *string            `json:"paper_venue"`
+	PaperPublishedAt         pgtype.Date        `json:"paper_published_at"`
+	PaperCitationCount       *int32             `json:"paper_citation_count"`
+	PaperMetaSource          *string            `json:"paper_meta_source"`
+	PaperCreatedAt           pgtype.Timestamptz `json:"paper_created_at"`
+	RepostID                 pgtype.UUID        `json:"repost_id"`
+	RepostAuthorName         *string            `json:"repost_author_name"`
+	RepostContentText        *string            `json:"repost_content_text"`
+	RepostPaperID            pgtype.UUID        `json:"repost_paper_id"`
+	RepostPaperDoi           *string            `json:"repost_paper_doi"`
+	RepostPaperArxivID       *string            `json:"repost_paper_arxiv_id"`
+	RepostPaperOpenreviewID  *string            `json:"repost_paper_openreview_id"`
+	RepostPaperTitle         *string            `json:"repost_paper_title"`
+	RepostPaperAuthors       []byte             `json:"repost_paper_authors"`
+	RepostPaperAbstract      *string            `json:"repost_paper_abstract"`
+	RepostPaperVenue         *string            `json:"repost_paper_venue"`
+	RepostPaperPublishedAt   pgtype.Date        `json:"repost_paper_published_at"`
+	RepostPaperCitationCount *int32             `json:"repost_paper_citation_count"`
+	RepostPaperMetaSource    *string            `json:"repost_paper_meta_source"`
+	RepostPaperCreatedAt     pgtype.Timestamptz `json:"repost_paper_created_at"`
+}
+
+// 话题页的帖子列表：按时间倒序，游标分页。
+// 只收公开且不属于群组的帖子，与信息流口径一致。
+func (q *Queries) ListPostsByTag(ctx context.Context, arg ListPostsByTagParams) ([]ListPostsByTagRow, error) {
+	rows, err := q.db.Query(ctx, listPostsByTag,
+		arg.ViewerID,
+		arg.Slug,
+		arg.CursorTime,
+		arg.CursorID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPostsByTagRow
+	for rows.Next() {
+		var i ListPostsByTagRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.AuthorID,
+			&i.Type,
+			&i.ContentHtml,
+			&i.ContentText,
+			&i.PaperID,
+			&i.RepostOf,
+			&i.GroupID,
+			&i.Visibility,
+			&i.LikeCount,
+			&i.CommentCount,
+			&i.RepostCount,
+			&i.HotScore,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.AuthorName,
+			&i.AuthorHandle,
+			&i.AuthorVerifyType,
+			&i.Liked,
+			&i.Bookmarked,
+			&i.Tags,
+			&i.PaperIDValue,
+			&i.PaperDoi,
+			&i.PaperArxivID,
+			&i.PaperOpenreviewID,
+			&i.PaperTitle,
+			&i.PaperAuthors,
+			&i.PaperAbstract,
+			&i.PaperVenue,
+			&i.PaperPublishedAt,
+			&i.PaperCitationCount,
+			&i.PaperMetaSource,
+			&i.PaperCreatedAt,
+			&i.RepostID,
+			&i.RepostAuthorName,
+			&i.RepostContentText,
+			&i.RepostPaperID,
+			&i.RepostPaperDoi,
+			&i.RepostPaperArxivID,
+			&i.RepostPaperOpenreviewID,
+			&i.RepostPaperTitle,
+			&i.RepostPaperAuthors,
+			&i.RepostPaperAbstract,
+			&i.RepostPaperVenue,
+			&i.RepostPaperPublishedAt,
+			&i.RepostPaperCitationCount,
+			&i.RepostPaperMetaSource,
+			&i.RepostPaperCreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTopTags = `-- name: ListTopTags :many
+SELECT t.name, t.slug,
+       (SELECT count(*) FROM post_tags pt
+          JOIN posts p ON p.id = pt.post_id
+         WHERE pt.tag_id = t.id
+           AND p.deleted_at IS NULL
+           AND p.visibility = 'public'
+           AND p.group_id IS NULL)::bigint AS post_count
+FROM tags t
+WHERE EXISTS (
+  SELECT 1 FROM post_tags pt
+    JOIN posts p ON p.id = pt.post_id
+   WHERE pt.tag_id = t.id
+     AND p.deleted_at IS NULL
+     AND p.visibility = 'public'
+     AND p.group_id IS NULL
+)
+ORDER BY post_count DESC, t.name ASC
+LIMIT $1
+`
+
+type ListTopTagsRow struct {
+	Name      string `json:"name"`
+	Slug      string `json:"slug"`
+	PostCount int64  `json:"post_count"`
+}
+
+// 话题列表页：按公开帖子数排序的热门标签。
+func (q *Queries) ListTopTags(ctx context.Context, pageLimit int32) ([]ListTopTagsRow, error) {
+	rows, err := q.db.Query(ctx, listTopTags, pageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTopTagsRow
+	for rows.Next() {
+		var i ListTopTagsRow
+		if err := rows.Scan(&i.Name, &i.Slug, &i.PostCount); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
