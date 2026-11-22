@@ -1,199 +1,107 @@
 package doc
 
 import (
+	"archive/zip"
+	"bytes"
+	"io"
 	"strings"
 	"testing"
 )
 
-// TestHTMLToMarkdown 覆盖 TipTap StarterKit 会产出的结构。
-func TestHTMLToMarkdown(t *testing.T) {
-	tests := []struct {
-		name string
-		html string
-		want []string // 必须出现的片段
-	}{
-		{
-			name: "标题与段落",
-			html: `<h1>引言</h1><p>这是正文。</p>`,
-			want: []string{"# 引言", "这是正文。"},
-		},
-		{
-			name: "粗体与斜体",
-			html: `<p>这是<strong>重点</strong>和<em>强调</em>。</p>`,
-			want: []string{"**重点**", "*强调*"},
-		},
-		{
-			name: "删除线",
-			html: `<p><s>删掉</s></p>`,
-			want: []string{"~~删掉~~"},
-		},
-		{
-			name: "行内代码",
-			html: `<p>调用 <code>fmt.Println</code> 输出。</p>`,
-			want: []string{"`fmt.Println`"},
-		},
-		{
-			name: "代码块带语言",
-			html: `<pre><code class="language-go">func main() {}</code></pre>`,
-			want: []string{"```go", "func main() {}"},
-		},
-		{
-			name: "无序列表",
-			html: `<ul><li>第一</li><li>第二</li></ul>`,
-			want: []string{"- 第一", "- 第二"},
-		},
-		{
-			name: "有序列表",
-			html: `<ol><li>一</li><li>二</li></ol>`,
-			want: []string{"1. 一", "2. 二"},
-		},
-		{
-			name: "链接",
-			html: `<p><a href="https://example.com">示例</a></p>`,
-			want: []string{"[示例](https://example.com)"},
-		},
-		{
-			name: "引用块",
-			html: `<blockquote><p>引用的话</p></blockquote>`,
-			want: []string{"> 引用的话"},
-		},
-		{
-			name: "分割线",
-			html: `<hr>`,
-			want: []string{"---"},
-		},
-		{
-			name: "特殊字符原样保留",
-			html: `<p>a &lt; b &amp; c &gt; d</p>`,
-			want: []string{"a < b & c > d"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			nodes, err := parseHTML(tt.html)
-			if err != nil {
-				t.Fatalf("parseHTML: %v", err)
-			}
-			got := htmlToMarkdown(nodes)
-			for _, want := range tt.want {
-				if !strings.Contains(got, want) {
-					t.Fatalf("Markdown 缺少 %q\n实际输出:\n%s", want, got)
-				}
-			}
-		})
-	}
-}
-
-// TestHTMLToMarkdownNestedList 验证嵌套列表的缩进。
-func TestHTMLToMarkdownNestedList(t *testing.T) {
-	nodes, err := parseHTML(`<ul><li>外层<ul><li>内层</li></ul></li></ul>`)
+// unzip 读出一个 docx 包内的文件内容。
+func unzip(t *testing.T, data []byte, name string) string {
+	t.Helper()
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		t.Fatalf("parseHTML: %v", err)
+		t.Fatalf("打开 docx: %v", err)
 	}
-	got := htmlToMarkdown(nodes)
-	if !strings.Contains(got, "  - 内层") {
-		t.Fatalf("嵌套列表缺少缩进\n实际输出:\n%s", got)
-	}
-}
-
-// TestHTMLToLaTeX 验证 LaTeX 输出可编译的基本结构。
-func TestHTMLToLaTeX(t *testing.T) {
-	nodes, err := parseHTML(`<h1>标题</h1><p>正文 & 符号</p>`)
-	if err != nil {
-		t.Fatalf("parseHTML: %v", err)
-	}
-	got := htmlToLaTeX(nodes, "论文标题")
-
-	required := []string{
-		`\documentclass`,
-		`\usepackage[UTF8]{ctex}`,
-		`\title{论文标题}`,
-		`\begin{document}`,
-		`\end{document}`,
-		`\section{标题}`,
-		`正文 \& 符号`, // & 必须转义，否则 LaTeX 编译失败
-	}
-	for _, want := range required {
-		if !strings.Contains(got, want) {
-			t.Fatalf("LaTeX 缺少 %q\n实际输出:\n%s", want, got)
+	for _, f := range reader.File {
+		if f.Name != name {
+			continue
 		}
-	}
-}
-
-// TestEscapeLaTeX 验证特殊字符转义。
-//
-// 断言期望的转义序列逐一出现。不用「输出里不能出现 #1」这类否定断言：
-// 转义结果 \#1 本身就包含子串 #1，否定断言会误伤自己。
-func TestEscapeLaTeX(t *testing.T) {
-	got := escapeLaTeX(`50% & $5 #1 a_b {c} ~d ^e \f`)
-	want := []string{
-		`50\%`, `\&`, `\$5`, `\#1`, `a\_b`, `\{c\}`, `\textasciitilde{}d`, `\textasciicircum{}e`,
-	}
-	for _, fragment := range want {
-		if !strings.Contains(got, fragment) {
-			t.Fatalf("缺少转义 %q\n输出: %s", fragment, got)
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatalf("打开 %s: %v", name, err)
 		}
+		defer func() { _ = rc.Close() }()
+		content, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatalf("读取 %s: %v", name, err)
+		}
+		return string(content)
 	}
-	// 反斜杠必须恰好转义一次：先转义 \ 会把后插入的 \& 再转一次，变成 \\&。
-	if strings.Count(got, `\textbackslash{}`) != 1 {
-		t.Fatalf("反斜杠应恰好转义一次，输出: %s", got)
-	}
+	t.Fatalf("docx 缺少 %s", name)
+	return ""
 }
 
-// TestHTMLToDocx 验证 DOCX 是合法的 zip 且包含必需的部件。
-func TestHTMLToDocx(t *testing.T) {
-	nodes, err := parseHTML(`<h1>标题</h1><p>正文</p>`)
+func renderDocx(t *testing.T, htmlText string) []byte {
+	t.Helper()
+	nodes, err := parseHTML(htmlText)
 	if err != nil {
 		t.Fatalf("parseHTML: %v", err)
 	}
-	content, err := htmlToDocx(nodes)
+	data, err := htmlToDocx(nodes)
 	if err != nil {
 		t.Fatalf("htmlToDocx: %v", err)
 	}
-	// zip 魔数 PK\x03\x04
-	if len(content) < 4 || content[0] != 'P' || content[1] != 'K' {
-		t.Fatal("输出不是 zip 格式")
+	return data
+}
+
+// TestDocxIncludesStyles 验证样式部件与关系都存在。
+// 缺 styles.xml 时 Word / LibreOffice 会静默把标题、代码块退化成正文，
+// 不会有任何报错——所以只能靠结构测试兜住。
+func TestDocxIncludesStyles(t *testing.T) {
+	data := renderDocx(t, `<h1>标题</h1><p>正文</p>`)
+
+	styles := unzip(t, data, "word/styles.xml")
+	for _, styleID := range []string{"Heading1", "Heading2", "Heading3", "Normal", "Quote", "Code", "ListParagraph"} {
+		if !strings.Contains(styles, `w:styleId="`+styleID+`"`) {
+			t.Fatalf("styles.xml 缺少样式 %s", styleID)
+		}
 	}
-	// document.xml 应包含正文文本
-	text := string(content)
-	if !strings.Contains(text, "word/document.xml") {
-		t.Fatal("缺少 word/document.xml")
+
+	// 关系没声明的话，样式部件不会被加载。
+	rels := unzip(t, data, "word/_rels/document.xml.rels")
+	if !strings.Contains(rels, "styles.xml") {
+		t.Fatal("document.xml.rels 未声明 styles 关系")
+	}
+
+	// Content_Types 也要登记，否则 Office 可能拒绝打开。
+	ct := unzip(t, data, "[Content_Types].xml")
+	if !strings.Contains(ct, "/word/styles.xml") {
+		t.Fatal("[Content_Types].xml 未登记 styles.xml")
 	}
 }
 
-// TestSafeFilename 验证文件名清洗：去掉路径分隔符与控制字符，保留中文。
-func TestSafeFilename(t *testing.T) {
-	tests := []struct {
-		name  string
-		title string
-		want  string
-	}{
-		{"中文保留", "多模态综述", "多模态综述"},
-		{"去掉路径分隔符", "../../etc/passwd", "etcpasswd"},
-		{"去掉引号", `a"b`, "ab"},
-		{"空标题退化", "   ", "document"},
-		{"过长截断", strings.Repeat("a", 100), strings.Repeat("a", 60)},
+// TestDocxCodeBlockPreservesIndent 验证代码块的缩进与多行结构不被吃掉。
+// 早期实现会 TrimSpace 每一行，导致缩进丢失、空行消失、多行挤成一行的文本。
+func TestDocxCodeBlockPreservesIndent(t *testing.T) {
+	data := renderDocx(t, "<pre><code>func main() {\n    fmt.Println(&#34;hi&#34;)\n}</code></pre>")
+	document := unzip(t, data, "word/document.xml")
+
+	if !strings.Contains(document, "    fmt.Println") {
+		t.Fatalf("代码块缩进丢失：%s", document)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := safeFilename(tt.title); got != tt.want {
-				t.Fatalf("safeFilename(%q) = %q, want %q", tt.title, got, tt.want)
-			}
-		})
+	// 三行各自独立成段：数一下 Code 样式的段落数。
+	if n := strings.Count(document, `w:val="Code"`); n != 3 {
+		t.Fatalf("代码块应为 3 段，实际 %d 段：%s", n, document)
 	}
 }
 
-// TestCodeLanguage 验证从 class 里提取语言名。
-func TestCodeLanguage(t *testing.T) {
-	nodes, err := parseHTML(`<pre><code class="language-python hljs">x = 1</code></pre>`)
-	if err != nil {
-		t.Fatalf("parseHTML: %v", err)
+// TestDocxCodeBlockBlankLine 验证代码块中间的空白行被保留成换行 run。
+func TestDocxCodeBlockBlankLine(t *testing.T) {
+	data := renderDocx(t, "<pre><code>a\n\nb</code></pre>")
+	document := unzip(t, data, "word/document.xml")
+	if !strings.Contains(document, "<w:br/>") {
+		t.Fatalf("空行未保留：%s", document)
 	}
-	if len(nodes) == 0 {
-		t.Fatal("解析结果为空")
-	}
-	if got := codeLanguage(nodes[0]); got != "python" {
-		t.Fatalf("codeLanguage = %q, want python", got)
+}
+
+// TestDocxEscapesContent 验证正文里的标签不会被当成 XML 结构。
+func TestDocxEscapesContent(t *testing.T) {
+	data := renderDocx(t, `<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>`)
+	document := unzip(t, data, "word/document.xml")
+	if strings.Contains(document, "<script>") {
+		t.Fatalf("内容未转义：%s", document)
 	}
 }

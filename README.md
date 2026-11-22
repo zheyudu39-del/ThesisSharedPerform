@@ -184,7 +184,7 @@ make web-check   # 前端类型检查
 **M4 · 策展与开放**
 
 - [x] 精选策展：策展集 CRUD、条目增删排序、上下架时间
-- [x] 文档导出：Markdown / LaTeX / DOCX（保留章节结构，中文经 ctex）
+- [x] 文档导出：PDF / Word / Markdown / LaTeX（保留章节结构，中文经 ctex）
 - [x] 文档导入：Word / LaTeX 转 HTML 写进协同编辑器，支持图片、表格与公式渲染
 - [x] 开放 API：API Key 管理、`/openapi/v1` 只读端点、scopes、按密钥限流
 

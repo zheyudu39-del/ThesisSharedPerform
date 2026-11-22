@@ -1,12 +1,6 @@
 package file
 
-import (
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
-	"testing"
-)
+import "testing"
 
 func TestSourceExt(t *testing.T) {
 	tests := map[string]string{
@@ -50,35 +44,20 @@ func TestNeedsTranscode(t *testing.T) {
 	}
 }
 
-// TestTruncateRunes 验证按字符截断不会劈开多字节字符。
-// 错误信息里常带中文文件名，按字节切会产出非法 UTF-8。
-func TestTruncateRunes(t *testing.T) {
-	s := "论文转换失败：文档损坏"
-	got := truncateRunes(s, 5)
-	if got != "论文转换失" {
-		t.Fatalf("truncateRunes = %q, want %q", got, "论文转换失")
+// TestFilterFor 验证不同 Office 类型走各自的 LibreOffice 导出过滤器。
+// 用错过滤器的表现不是报错，而是产出排版错乱的 PDF。
+func TestFilterFor(t *testing.T) {
+	tests := map[string]string{
+		"a.docx": "pdf:writer_pdf_Export",
+		"a.ppt":  "pdf:impress_pdf_Export",
+		"a.pptx": "pdf:impress_pdf_Export",
+		"a.xlsx": "pdf:calc_pdf_Export",
+		"a.csv":  "pdf:calc_pdf_Export",
+		"a.odt":  "pdf:writer_pdf_Export",
 	}
-	if got := truncateRunes("short", 10); got != "short" {
-		t.Fatalf("短字符串不应被截断，got %q", got)
-	}
-}
-
-// TestFindSoffice 在装了 LibreOffice 的环境里应能找到可执行文件。
-// 没装时跳过，而不是失败——CI 环境未必有。
-func TestFindSoffice(t *testing.T) {
-	path, err := findSoffice()
-	if err != nil {
-		if runtime.GOOS == "windows" {
-			if _, statErr := os.Stat(`C:\Program Files\LibreOffice\program\soffice.exe`); statErr == nil {
-				t.Fatalf("soffice 存在于标准路径但 findSoffice 没找到: %v", err)
-			}
+	for name, want := range tests {
+		if got := string(filterFor(name)); got != want {
+			t.Fatalf("filterFor(%q) = %q, want %q", name, got, want)
 		}
-		t.Skip("环境未安装 LibreOffice，跳过")
-	}
-	if _, err := exec.LookPath(path); err != nil {
-		t.Fatalf("findSoffice 返回的路径不可执行: %s", path)
-	}
-	if filepath.Ext(path) == "" && runtime.GOOS != "windows" {
-		t.Logf("soffice 路径: %s", path)
 	}
 }

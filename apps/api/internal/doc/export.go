@@ -5,10 +5,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/thesis-shared/api/internal/officeconv"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 )
@@ -18,7 +23,12 @@ const (
 	FormatMarkdown = "md"
 	FormatLaTeX    = "tex"
 	FormatDocx     = "docx"
+	FormatPDF      = "pdf"
 )
+
+// pdfExportTimeout 是「DOCX → PDF」这一步的总超时。
+// LibreOffice 冷启动就要几秒，文档越长越慢，给足余量。
+const pdfExportTimeout = 2 * time.Minute
 
 // maxExportHTML 限制前端提交的 HTML 体积。
 // 协同编辑器里的一篇文档通常几十 KB；1 MB 足够覆盖长文，
@@ -84,9 +94,57 @@ func (s *Service) ExportHTML(ctx context.Context, userID, docID uuid.UUID, rawHT
 			Filename:    safeFilename(title) + ".docx",
 			ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 		}, nil
+	case FormatPDF:
+		// PDF 不单独实现排版：先复用 docx 生成器得到与 Word 导出完全
+		// 一致的版式，再交给 LibreOffice 转成 PDF。两条路径共用一套
+		// 正文序列化逻辑，导出结果不会「Word 和 PDF 长得不一样」。
+		return exportPDF(ctx, nodes, title)
 	default:
 		return ExportResult{}, fmt.Errorf("%w: 不支持的导出格式 %q", ErrValidation, format)
 	}
+}
+
+// exportPDF 生成 DOCX 并交给 LibreOffice 转 PDF。
+//
+// 失败语义：部署环境没装 LibreOffice 时返回明确的错误，而不是让用户
+// 只看到一句「导出失败」——那样运维根本不知道缺了依赖。
+func exportPDF(ctx context.Context, nodes []*html.Node, title string) (ExportResult, error) {
+	docx, err := htmlToDocx(nodes)
+	if err != nil {
+		return ExportResult{}, err
+	}
+
+	workDir, err := os.MkdirTemp("", "thesis-export-*")
+	if err != nil {
+		return ExportResult{}, fmt.Errorf("创建临时目录: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(workDir) }()
+
+	srcPath := filepath.Join(workDir, "document.docx")
+	if err := os.WriteFile(srcPath, docx, 0o600); err != nil {
+		return ExportResult{}, fmt.Errorf("写入临时文档: %w", err)
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, pdfExportTimeout)
+	defer cancel()
+
+	pdfPath, err := officeconv.ToPDF(runCtx, srcPath, workDir, officeconv.FilterWriter)
+	if err != nil {
+		if errors.Is(err, officeconv.ErrMissing) {
+			return ExportResult{}, fmt.Errorf("%w: 服务器未安装 LibreOffice，无法导出 PDF（可改用 Word 导出）", ErrValidation)
+		}
+		return ExportResult{}, fmt.Errorf("%w: %v", ErrValidation, err)
+	}
+
+	content, err := os.ReadFile(pdfPath)
+	if err != nil {
+		return ExportResult{}, fmt.Errorf("读取 PDF 产物: %w", err)
+	}
+	return ExportResult{
+		Content:     content,
+		Filename:    safeFilename(title) + ".pdf",
+		ContentType: "application/pdf",
+	}, nil
 }
 
 // documentTitle 读取文档标题用于文件名。查不到时退化为 "document"，
@@ -576,6 +634,55 @@ func escapeLaTeXURL(s string) string {
 // HTML → DOCX
 // ---------------------------------------------------------------------------
 
+// docxStyles 定义导出时用到的段落样式。
+//
+// 为什么必须显式定义：document.xml 里 <w:pStyle w:val="Heading1"/> 只给了
+// 样式名，真正的字号、间距、颜色都从 styles.xml 查。缺了这个部件，Word 与
+// LibreOffice 会静默退化成默认正文——表现是标题不粗、代码块跟正文一样，
+// 而且不会有任何报错提示。
+//
+// 只定义导出真正会用到的名字（Heading1~3、Normal、Quote、Code、
+// ListParagraph），不追求覆盖 Word 的全部内置样式。
+const docxStyles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+	`<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+	`<w:docDefaults><w:rPrDefault><w:rPr>` +
+	`<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="SimSun"/>` +
+	`<w:sz w:val="24"/><w:szCs w:val="24"/>` +
+	`</w:rPr></w:rPrDefault>` +
+	`<w:pPrDefault><w:pPr><w:spacing w:after="120" w:line="360" w:lineRule="auto"/></w:pPr></w:pPrDefault>` +
+	`</w:docDefaults>` +
+	// Normal：显式命名，避免依赖默认段落样式。
+	`<w:style w:type="paragraph" w:default="1" w:styleId="Normal">` +
+	`<w:name w:val="Normal"/><w:qFormat/></w:style>` +
+	// 标题 1~3：加粗、字号递减、段前留白。
+	`<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>` +
+	`<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>` +
+	`<w:pPr><w:keepNext/><w:spacing w:before="360" w:after="160"/><w:outlineLvl w:val="0"/></w:pPr>` +
+	`<w:rPr><w:b/><w:sz w:val="36"/><w:szCs w:val="36"/></w:rPr></w:style>` +
+	`<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/>` +
+	`<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>` +
+	`<w:pPr><w:keepNext/><w:spacing w:before="280" w:after="120"/><w:outlineLvl w:val="1"/></w:pPr>` +
+	`<w:rPr><w:b/><w:sz w:val="30"/><w:szCs w:val="30"/></w:rPr></w:style>` +
+	`<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/>` +
+	`<w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:qFormat/>` +
+	`<w:pPr><w:keepNext/><w:spacing w:before="240" w:after="100"/><w:outlineLvl w:val="2"/></w:pPr>` +
+	`<w:rPr><w:b/><w:sz w:val="26"/><w:szCs w:val="26"/></w:rPr></w:style>` +
+	// Quote：左侧缩进 + 灰色，与网页端引用块观感一致。
+	`<w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/>` +
+	`<w:basedOn w:val="Normal"/><w:qFormat/>` +
+	`<w:pPr><w:ind w:left="720"/><w:pBdr><w:left w:val="single" w:sz="12" w:space="8" w:color="BFBFBF"/></w:pBdr></w:pPr>` +
+	`<w:rPr><w:i/><w:color w:val="595959"/></w:rPr></w:style>` +
+	// Code：等宽字体 + 浅灰底，代码块在 PDF 里能一眼区分。
+	`<w:style w:type="paragraph" w:styleId="Code"><w:name w:val="Code"/>` +
+	`<w:basedOn w:val="Normal"/><w:qFormat/>` +
+	`<w:pPr><w:shd w:val="clear" w:color="auto" w:fill="F2F2F2"/><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>` +
+	`<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/><w:sz w:val="20"/><w:szCs w:val="20"/></w:rPr></w:style>` +
+	// ListParagraph：悬挂缩进，让「• 」这种手写符号对齐。
+	`<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/>` +
+	`<w:basedOn w:val="Normal"/><w:qFormat/>` +
+	`<w:pPr><w:ind w:left="420" w:hanging="240"/></w:pPr></w:style>` +
+	`</w:styles>`
+
 // htmlToDocx 生成最小可用的 Word 文档（OOXML）。
 //
 // 为什么手写而不引第三方库：docx 的最小结构只有三个 XML 部件
@@ -601,11 +708,19 @@ func htmlToDocx(nodes []*html.Node) ([]byte, error) {
 		`<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
 		`<Default Extension="xml" ContentType="application/xml"/>` +
 		`<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>` +
+		`<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>` +
 		`</Types>`
 
+	// document.xml.rels 必须声明 styles 关系，否则 Word 与 LibreOffice 都不会
+	// 加载 styles.xml——段落里的 pStyle 引用会静默退化成默认样式。
 	rels := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
 		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
 		`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>` +
+		`</Relationships>`
+
+	docRels := `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+		`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+		`<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
 		`</Relationships>`
 
 	var buf bytes.Buffer
@@ -616,6 +731,8 @@ func htmlToDocx(nodes []*html.Node) ([]byte, error) {
 	}{
 		{"[Content_Types].xml", contentTypes},
 		{"_rels/.rels", rels},
+		{"word/_rels/document.xml.rels", docRels},
+		{"word/styles.xml", docxStyles},
 		{"word/document.xml", documentXML},
 	}
 	for _, file := range files {
@@ -654,8 +771,22 @@ func renderDocxBlock(b *strings.Builder, node *html.Node) {
 	case "p":
 		writeDocxParagraph(b, textContent(node), "Normal", false)
 	case "pre":
-		for _, line := range strings.Split(textContent(node), "\n") {
-			writeDocxParagraph(b, line, "Code", false)
+		// 代码块按行拆成独立段落，逐行写样式 —— 不能让 writeDocxParagraph
+		// 去 TrimSpace：那样每行的缩进会被吃掉，空行也会消失，代码块的
+		// 结构就毁了。这里直接调用 writeDocxParagraphRaw（不裁剪）。
+		lines := strings.Split(textContent(node), "\n")
+		// 去掉末尾因闭合标签产生的空行，但保留中间的空行。
+		for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+			lines = lines[:len(lines)-1]
+		}
+		for _, line := range lines {
+			if line == "" {
+				// 空行：用一个只含换行的 run 撑起高度。完全不写的话，
+				// Word 会把整个段落折叠掉，代码块里的空行就消失了。
+				b.WriteString(`<w:p><w:pPr><w:pStyle w:val="Code"/></w:pPr><w:r><w:br/></w:r></w:p>`)
+				continue
+			}
+			writeDocxParagraphRaw(b, line, "Code", false)
 		}
 	case "ul", "ol":
 		for item := node.FirstChild; item != nil; item = item.NextSibling {
@@ -676,8 +807,16 @@ func renderDocxBlock(b *strings.Builder, node *html.Node) {
 
 // writeDocxParagraph 写一个段落。style 为 Word 内置样式名；
 // italic 用于引用块。
+//
+// 会裁剪首尾空白，空段落直接跳过——正文段落不需要保留缩进。
+// 代码块必须用 writeDocxParagraphRaw：那里的缩进是有意义的。
 func writeDocxParagraph(b *strings.Builder, text, style string, italic bool) {
-	text = strings.TrimSpace(text)
+	writeDocxParagraphRaw(b, strings.TrimSpace(text), style, italic)
+}
+
+// writeDocxParagraphRaw 不裁剪文本地写一个段落。
+// 只有空字符串会被跳过；纯空白行也保留（代码块里的空行是结构的一部分）。
+func writeDocxParagraphRaw(b *strings.Builder, text, style string, italic bool) {
 	if text == "" {
 		return
 	}

@@ -171,9 +171,10 @@ export async function getCollabToken(id: string): Promise<CollabToken> {
 /* 导出                                                                        */
 /* -------------------------------------------------------------------------- */
 
-export type ExportFormat = "docx" | "md" | "tex";
+export type ExportFormat = "pdf" | "docx" | "md" | "tex";
 
 export const EXPORT_FORMAT_LABEL: Record<ExportFormat, string> = {
+  pdf: "PDF (.pdf)",
   docx: "Word (.docx)",
   md: "Markdown (.md)",
   tex: "LaTeX (.tex)",
