@@ -87,6 +87,10 @@ type Item struct {
 	Title      string    `json:"title"`
 	Snippet    string    `json:"snippet"`
 	Rank       float32   `json:"rank"`
+	// Slug 是实体的路由段：用户为 handle，群组为 slug，其余为空。
+	// 前端据此拼出 /u/{handle} 或 /groups/{slug}；只有 entityId 时
+	// 无法定位到可读地址。
+	Slug string `json:"slug"`
 }
 
 // Result 是一次检索的完整结果。
@@ -129,6 +133,7 @@ type filteredRow struct {
 	Body            string      `db:"body"`
 	Rank            float32     `db:"rank"`
 	TitleSimilarity float32     `db:"title_similarity"`
+	Slug            string      `db:"slug"`
 }
 
 // filteredQuerier 抽象带筛选的检索。
@@ -298,6 +303,7 @@ func (s *Service) Query(ctx context.Context, input QueryInput) (Result, error) {
 			// ts_rank 对「仅被 ILIKE / trigram 命中」的行恒为 0，
 			// 叠加标题相似度让这类结果也有可比较的分数（权重取 0.5，不改变 SQL 的排序主次）。
 			Rank: row.rank + 0.5*row.titleSimilarity,
+			Slug: row.slug,
 		})
 	}
 	return Result{Items: items, Total: len(items)}, nil
@@ -311,6 +317,7 @@ type searchRow struct {
 	body            string
 	rank            float32
 	titleSimilarity float32
+	slug            string
 }
 
 // fetch 按是否限定类型选择查询。
@@ -331,6 +338,7 @@ func (s *Service) fetch(ctx context.Context, text string, types []string, limit 
 			out = append(out, searchRow{
 				entityType: r.EntityType, entityID: r.EntityID, title: r.Title,
 				body: r.Body, rank: r.Rank, titleSimilarity: r.TitleSimilarity,
+				slug: r.Slug,
 			})
 		}
 		return out, nil
@@ -350,6 +358,7 @@ func (s *Service) fetch(ctx context.Context, text string, types []string, limit 
 		out = append(out, searchRow{
 			entityType: r.EntityType, entityID: r.EntityID, title: r.Title,
 			body: r.Body, rank: r.Rank, titleSimilarity: r.TitleSimilarity,
+			slug: r.Slug,
 		})
 	}
 	return out, nil
@@ -400,6 +409,7 @@ func (s *Service) fetchFiltered(ctx context.Context, text string, types []string
 		out = append(out, searchRow{
 			entityType: r.EntityType, entityID: r.EntityID, title: r.Title,
 			body: r.Body, rank: r.Rank, titleSimilarity: r.TitleSimilarity,
+			slug: r.Slug,
 		})
 	}
 	return out, nil
@@ -425,7 +435,12 @@ SELECT
     COALESCE(sd.title, '')::text AS title,
     COALESCE(sd.body, '')::text  AS body,
     ts_rank(sd.tsv, q.tsq)::real AS rank,
-    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity
+    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity,
+    (CASE
+      WHEN sd.entity_type = 'user'  THEN (SELECT u.handle FROM users u  WHERE u.id = sd.entity_id AND u.deleted_at IS NULL)
+      WHEN sd.entity_type = 'group' THEN (SELECT g.slug   FROM groups g WHERE g.id = sd.entity_id)
+      ELSE NULL
+    END)::text AS slug
 FROM search_documents sd
 CROSS JOIN q
 LEFT JOIN posts p  ON sd.entity_type = 'post'  AND p.id = sd.entity_id AND p.deleted_at IS NULL

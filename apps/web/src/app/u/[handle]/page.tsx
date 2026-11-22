@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { BlockButton } from "@/components/BlockButton";
 import { FollowerCount, ProfileFollowButton } from "@/components/ProfileInteractive";
+import { ProfilePosts } from "@/components/ProfilePosts";
 import { SealBadge } from "@/components/SealBadge";
 import { SiteHeader } from "@/components/SiteHeader";
 import { fetchPublicUser } from "@/lib/server-api";
@@ -154,9 +155,7 @@ export default async function ProfilePage({ params }: PageProps) {
           <Stat label="关注中" value={stats.followingCount} />
         </dl>
 
-        <p className="mt-8 rounded-[12px] border border-dashed border-line-strong bg-surface px-5 py-6 text-center text-[0.85rem] leading-relaxed text-ink-2">
-          该用户还没有公开的帖子列表。关注后，他/她的新帖会出现在你的关注流里。
-        </p>
+        <ProfilePosts handle={user.handle} />
 
         <p className="mt-6 text-center">
           <Link href="/" className="text-[0.84rem] text-ink-2 hover:text-ink hover:underline">

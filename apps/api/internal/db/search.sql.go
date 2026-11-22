@@ -40,7 +40,15 @@ SELECT
     COALESCE(sd.title, '')::text AS title,
     COALESCE(sd.body, '')::text  AS body,
     ts_rank(sd.tsv, q.tsq)::real AS rank,
-    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity
+    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity,
+    -- slug 是实体的路由段：用户取 handle，群组取 slug，其余为 NULL。
+    -- 搜索结果要靠它拼出 /u/{handle}、/groups/{slug}；只返回 entity_id
+    -- 的话前端没有接口能把它换成可读的地址。
+    (CASE
+      WHEN sd.entity_type = 'user'  THEN (SELECT u.handle FROM users u  WHERE u.id = sd.entity_id AND u.deleted_at IS NULL)
+      WHEN sd.entity_type = 'group' THEN (SELECT g.slug   FROM groups g WHERE g.id = sd.entity_id)
+      ELSE NULL
+    END)::text AS slug
 FROM search_documents sd
 CROSS JOIN q
 WHERE sd.tsv @@ q.tsq
@@ -64,6 +72,7 @@ type SearchAllRow struct {
 	Body            string      `json:"body"`
 	Rank            float32     `json:"rank"`
 	TitleSimilarity float32     `json:"title_similarity"`
+	Slug            string      `json:"slug"`
 }
 
 // 跨实体类型的统一检索。
@@ -98,6 +107,7 @@ func (q *Queries) SearchAll(ctx context.Context, arg SearchAllParams) ([]SearchA
 			&i.Body,
 			&i.Rank,
 			&i.TitleSimilarity,
+			&i.Slug,
 		); err != nil {
 			return nil, err
 		}
@@ -121,7 +131,15 @@ SELECT
     COALESCE(sd.title, '')::text AS title,
     COALESCE(sd.body, '')::text  AS body,
     ts_rank(sd.tsv, q.tsq)::real AS rank,
-    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity
+    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity,
+    -- slug 是实体的路由段：用户取 handle，群组取 slug，其余为 NULL。
+    -- 搜索结果要靠它拼出 /u/{handle}、/groups/{slug}；只返回 entity_id
+    -- 的话前端没有接口能把它换成可读的地址。
+    (CASE
+      WHEN sd.entity_type = 'user'  THEN (SELECT u.handle FROM users u  WHERE u.id = sd.entity_id AND u.deleted_at IS NULL)
+      WHEN sd.entity_type = 'group' THEN (SELECT g.slug   FROM groups g WHERE g.id = sd.entity_id)
+      ELSE NULL
+    END)::text AS slug
 FROM search_documents sd
 CROSS JOIN q
 WHERE (
@@ -149,6 +167,7 @@ type SearchByTypesRow struct {
 	Body            string      `json:"body"`
 	Rank            float32     `json:"rank"`
 	TitleSimilarity float32     `json:"title_similarity"`
+	Slug            string      `json:"slug"`
 }
 
 // 与 SearchAll 相同，但限定实体类型（types 为空数组时不会命中任何行，
@@ -174,6 +193,7 @@ func (q *Queries) SearchByTypes(ctx context.Context, arg SearchByTypesParams) ([
 			&i.Body,
 			&i.Rank,
 			&i.TitleSimilarity,
+			&i.Slug,
 		); err != nil {
 			return nil, err
 		}
@@ -197,7 +217,15 @@ SELECT
     COALESCE(sd.title, '')::text AS title,
     COALESCE(sd.body, '')::text  AS body,
     ts_rank(sd.tsv, q.tsq)::real AS rank,
-    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity
+    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity,
+    -- slug 是实体的路由段：用户取 handle，群组取 slug，其余为 NULL。
+    -- 搜索结果要靠它拼出 /u/{handle}、/groups/{slug}；只返回 entity_id
+    -- 的话前端没有接口能把它换成可读的地址。
+    (CASE
+      WHEN sd.entity_type = 'user'  THEN (SELECT u.handle FROM users u  WHERE u.id = sd.entity_id AND u.deleted_at IS NULL)
+      WHEN sd.entity_type = 'group' THEN (SELECT g.slug   FROM groups g WHERE g.id = sd.entity_id)
+      ELSE NULL
+    END)::text AS slug
 FROM search_documents sd
 CROSS JOIN q
 LEFT JOIN posts p  ON sd.entity_type = 'post'  AND p.id = sd.entity_id AND p.deleted_at IS NULL
@@ -260,6 +288,7 @@ type SearchFilteredRow struct {
 	Body            string      `json:"body"`
 	Rank            float32     `json:"rank"`
 	TitleSimilarity float32     `json:"title_similarity"`
+	Slug            string      `json:"slug"`
 }
 
 // 带筛选条件的检索（S-03）：时间范围 / 标签 / 作者。
@@ -301,6 +330,7 @@ func (q *Queries) SearchFiltered(ctx context.Context, arg SearchFilteredParams) 
 			&i.Body,
 			&i.Rank,
 			&i.TitleSimilarity,
+			&i.Slug,
 		); err != nil {
 			return nil, err
 		}

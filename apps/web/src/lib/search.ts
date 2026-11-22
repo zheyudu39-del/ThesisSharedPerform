@@ -20,6 +20,11 @@ export type SearchItem = {
   /** 已转义并带 <mark> 高亮的片段。 */
   snippet: string;
   rank: number;
+  /**
+   * 实体的路由段：用户为 handle、群组为 slug，论文与帖子为空。
+   * 服务端在检索时 JOIN 回源表取得——只有 entityId 时前端拼不出可读地址。
+   */
+  slug: string;
 };
 
 export type SearchResult = {
@@ -58,6 +63,7 @@ function normalizeItem(value: unknown): SearchItem | null {
     title: str(value.title),
     snippet: str(value.snippet),
     rank: typeof value.rank === "number" && Number.isFinite(value.rank) ? value.rank : 0,
+    slug: str(value.slug),
   };
 }
 
@@ -98,8 +104,9 @@ export async function search(
 /**
  * 结果的站内地址。
  *
- * 论文、帖子有直接详情路由；用户需要 handle、群组需要 slug，
- * 而检索结果只带实体 ID，因此这两类暂不生成链接（展示为纯文本卡片）。
+ * 论文与帖子用实体 ID；用户与群组的路由段是 handle / slug，
+ * 由服务端在检索时一并返回（见 SearchItem.slug）。取不到 slug 时
+ * 返回 null，卡片退化为纯文本而不是给一个必然 404 的链接。
  */
 export function searchItemHref(item: SearchItem): string | null {
   switch (item.entityType) {
@@ -107,6 +114,10 @@ export function searchItemHref(item: SearchItem): string | null {
       return `/papers/${encodeURIComponent(item.entityId)}`;
     case "post":
       return `/posts/${encodeURIComponent(item.entityId)}`;
+    case "user":
+      return item.slug ? `/u/${encodeURIComponent(item.slug)}` : null;
+    case "group":
+      return item.slug ? `/groups/${encodeURIComponent(item.slug)}` : null;
     default:
       return null;
   }

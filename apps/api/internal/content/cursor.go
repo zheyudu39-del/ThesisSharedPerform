@@ -22,9 +22,22 @@ type cursor struct {
 	HotScore  *float64  `json:"h,omitempty"`
 }
 
+// cursorStreams 是允许使用时间序游标的列表。
+//
+// posts / reposts 是个人主页的发帖与转发 Tab：排序键同样是
+// (created_at, id)，与 all 完全一致，只是多了作者过滤。
+var cursorStreams = map[string]struct{}{
+	"following": {},
+	"all":       {},
+	"hot":       {},
+	"comments":  {},
+	"posts":     {},
+	"reposts":   {},
+}
+
 // EncodeCursor 将信息流游标编码为 URL 安全的 base64 字符串。
 func EncodeCursor(stream string, createdAt time.Time, id uuid.UUID, hotScore *float64) (string, error) {
-	if stream != "following" && stream != "all" && stream != "hot" && stream != "comments" {
+	if _, ok := cursorStreams[stream]; !ok {
 		return "", ErrInvalidCursor
 	}
 	if id == uuid.Nil || createdAt.IsZero() || (stream == "hot" && hotScore == nil) || (stream != "hot" && hotScore != nil) {
@@ -44,6 +57,9 @@ func EncodeCursor(stream string, createdAt time.Time, id uuid.UUID, hotScore *fl
 func DecodeCursor(raw, stream string) (createdAt time.Time, id uuid.UUID, hotScore *float64, err error) {
 	if raw == "" {
 		return time.Time{}, uuid.Nil, nil, nil
+	}
+	if _, ok := cursorStreams[stream]; !ok {
+		return time.Time{}, uuid.Nil, nil, ErrInvalidCursor
 	}
 	if len(raw) > 1024 {
 		return time.Time{}, uuid.Nil, nil, ErrInvalidCursor

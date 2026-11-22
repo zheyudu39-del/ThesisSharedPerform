@@ -422,6 +422,9 @@ function normalizeItem(value: unknown): SearchItem | null {
     title: typeof value.title === "string" ? value.title : "",
     snippet: typeof value.snippet === "string" ? value.snippet : "",
     rank: typeof value.rank === "number" && Number.isFinite(value.rank) ? value.rank : 0,
+    // 用户取 handle、群组取 slug，服务端已 JOIN 回源表填好；
+    // 论文与帖子没有这个字段，留空即可。
+    slug: typeof value.slug === "string" ? value.slug : "",
   };
 }
 

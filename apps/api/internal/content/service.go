@@ -690,6 +690,103 @@ func (s *Service) Feed(ctx context.Context, userID uuid.UUID, stream, rawCursor 
 	return FeedResult{Posts: posts, NextCursor: next}, nil
 }
 
+// AuthorPosts 返回某作者的个人主页帖子列表（PRD A-03）。
+//
+// kind 取 "posts"（原创）或 "reposts"（转发）。两条查询的 SELECT 投影与
+// 信息流一致，因此可以复用 toPost 与同一套游标编码。
+//
+// viewerID 用于 liked / bookmarked 标记；匿名访问时传 uuid.Nil，
+// 此时两个标记恒为 false——这也是它们本来就该有的值。
+func (s *Service) AuthorPosts(ctx context.Context, viewerID uuid.UUID, handle, kind, rawCursor string, limit int32) (FeedResult, error) {
+	if kind != "posts" && kind != "reposts" {
+		return FeedResult{}, fmt.Errorf("%w: kind 只能是 posts 或 reposts", ErrValidation)
+	}
+	if s.handles == nil {
+		return FeedResult{}, fmt.Errorf("%w: 账号服务未配置", ErrValidation)
+	}
+	handle = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(handle), "@"))
+	resolved, err := s.handles.ResolveHandles(ctx, []string{handle})
+	if err != nil {
+		return FeedResult{}, err
+	}
+	authorID, ok := resolved[handle]
+	if !ok || authorID == uuid.Nil {
+		// 不存在与已注销共用 404，避免探测账号状态。
+		return FeedResult{}, ErrPostNotFound
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	createdAt, id, _, err := DecodeCursor(rawCursor, kind)
+	if err != nil {
+		return FeedResult{}, err
+	}
+
+	q := db.New(s.pool)
+	params := db.ListAuthorPostsParams{
+		ViewerID:   uuidParam(viewerID),
+		AuthorID:   uuidParam(authorID),
+		CursorTime: pgtype.Timestamptz{Time: createdAt, Valid: rawCursor != ""},
+		CursorID:   uuidParam(id),
+		PageLimit:  limit + 1,
+	}
+
+	var rows []db.GetPostByIDRow
+	if kind == "posts" {
+		result, err := q.ListAuthorPosts(ctx, params)
+		if err != nil {
+			return FeedResult{}, err
+		}
+		for _, row := range result {
+			rows = append(rows, db.GetPostByIDRow(row))
+		}
+	} else {
+		result, err := q.ListAuthorReposts(ctx, db.ListAuthorRepostsParams{
+			ViewerID:   params.ViewerID,
+			AuthorID:   params.AuthorID,
+			CursorTime: params.CursorTime,
+			CursorID:   params.CursorID,
+			PageLimit:  params.PageLimit,
+		})
+		if err != nil {
+			return FeedResult{}, err
+		}
+		for _, row := range result {
+			rows = append(rows, db.GetPostByIDRow(row))
+		}
+	}
+
+	hasMore := len(rows) > int(limit)
+	if hasMore {
+		rows = rows[:limit]
+	}
+	posts := make([]Post, 0, len(rows))
+	for _, row := range rows {
+		post, err := toPost(row)
+		if err != nil {
+			return FeedResult{}, err
+		}
+		posts = append(posts, post)
+	}
+	if err := s.attachFiles(ctx, s.attachments, posts); err != nil {
+		slog.Error("加载个人主页附件失败", "author", authorID, "kind", kind, "err", err)
+	}
+
+	var next *string
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		encoded, err := EncodeCursor(kind, last.CreatedAt.Time, last.ID.Bytes, nil)
+		if err != nil {
+			return FeedResult{}, err
+		}
+		next = &encoded
+	}
+	return FeedResult{Posts: posts, NextCursor: next}, nil
+}
+
 // SetLike 原子维护 reaction 和冗余计数，重复操作幂等。
 func (s *Service) SetLike(ctx context.Context, userID, postID uuid.UUID, liked bool) (int32, error) {
 	tx, err := s.pool.Begin(ctx)

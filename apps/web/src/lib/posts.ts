@@ -332,6 +332,31 @@ export async function getBookmarks(
 }
 
 /**
+ * 拉取某个作者个人主页的帖子（PRD A-03）。
+ *
+ * kind 为 "posts"（原创）或 "reposts"（转发）。接口公开可读，未登录也能看；
+ * 带会话时响应里的 liked / bookmarked 会正确填充。
+ */
+export async function getAuthorPosts(
+  handle: string,
+  kind: "posts" | "reposts",
+  cursor: string | null = null,
+  limit = 20,
+): Promise<FeedPage> {
+  const params = new URLSearchParams({
+    type: kind,
+    limit: String(Math.min(Math.max(limit, 1), 50)),
+  });
+  if (cursor) params.set("cursor", cursor);
+
+  const body = await apiFetch(
+    `/users/${encodeURIComponent(handle)}/posts?${params.toString()}`,
+    { method: "GET" },
+  );
+  return normalizePostList(body);
+}
+
+/**
  * 单个帖子详情。
  *
  * 令牌可选：未登录也能尝试读取公开帖；服务端对「不存在」与「无权查看」

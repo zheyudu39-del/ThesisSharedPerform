@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/mail"
 	"regexp"
 	"strings"
@@ -68,11 +69,53 @@ type ProfileQuerier interface {
 }
 
 // Service 处理注册、登录和用户资料查询。
+// Indexer 是检索索引的抽象，由 server 组装时注入（与 group / content 一致）。
+//
+// 为什么不在这里直接 import search：identity 是最底层的包，
+// 加一个反向依赖会让 search 与 identity 的导入关系变得难以推理。
+type Indexer interface {
+	Index(ctx context.Context, doc SearchDocument) error
+}
+
+// SearchDocument 与 search.IndexInput 字段一一对应，单独声明以免反向依赖。
+type SearchDocument struct {
+	EntityType string
+	EntityID   uuid.UUID
+	Title      string
+	Body       string
+}
+
 type Service struct {
 	querier Querier
 	profile ProfileQuerier
+	indexer Indexer
 	pool    *pgxpool.Pool
 	tokens  *TokenManager
+}
+
+// SetIndexer 注入检索索引实现；不注入时索引被静默跳过。
+func (s *Service) SetIndexer(indexer Indexer) { s.indexer = indexer }
+
+// indexUser 把用户写进检索索引（PRD S-01 要求「论文、帖子、用户、群组」可搜）。
+//
+// 标题存显示名、正文句柄、机构与研究方向：用户搜「张三」按名字命中，
+// 搜「zhangsan」按句柄命中，搜「清华大学」也能找到该机构的人。
+//
+// 失败只记日志：注册或改资料已经成功，索引没写上不该让整个请求失败
+// ——用户下次改资料或登录时还会再写一次。
+func (s *Service) indexUser(ctx context.Context, user User) {
+	if s.indexer == nil || user.ID == uuid.Nil {
+		return
+	}
+	body := strings.TrimSpace(strings.Join([]string{user.Handle, user.Institution, strings.Join(user.ResearchFields, " ")}, " "))
+	if err := s.indexer.Index(ctx, SearchDocument{
+		EntityType: "user",
+		EntityID:   user.ID,
+		Title:      user.Name,
+		Body:       body,
+	}); err != nil {
+		slog.Error("索引用户失败", "userId", user.ID, "err", err)
+	}
 }
 
 func NewService(pool *pgxpool.Pool, tokens *TokenManager) *Service {
@@ -133,6 +176,7 @@ func (s *Service) Register(ctx context.Context, input RegisterInput) (User, stri
 		}
 	}
 	user := userFromDB(created)
+	s.indexUser(ctx, user)
 	token, err := s.tokens.Issue(user.ID)
 	if err != nil {
 		return User{}, "", fmt.Errorf("签发访问令牌失败: %w", err)
@@ -383,7 +427,10 @@ func (s *Service) UpdateProfile(ctx context.Context, userID uuid.UUID, input Upd
 	if err != nil {
 		return User{}, fmt.Errorf("更新用户资料失败: %w", err)
 	}
-	return userFromDB(record), nil
+	user := userFromDB(record)
+	// 改了名字 / 机构 / 研究方向之后索引要跟着变，否则搜索里还是旧资料。
+	s.indexUser(ctx, user)
+	return user, nil
 }
 
 // buildUpdateProfileParams 做校验并组装参数。

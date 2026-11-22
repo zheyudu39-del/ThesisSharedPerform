@@ -94,6 +94,32 @@ func (h *ContentHandler) Feed(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// UserPosts 处理 GET /api/v1/users/{handle}/posts?type=posts|reposts。
+//
+// 个人主页的「发帖 / 转发」Tab（PRD A-03）。公开可读：别人的主页不该
+// 要求登录才能看；带会话时会顺便填上 liked / bookmarked 标记。
+func (h *ContentHandler) UserPosts(w http.ResponseWriter, r *http.Request) {
+	viewerID, _ := appmiddleware.UserID(r.Context())
+
+	kind := r.URL.Query().Get("type")
+	if kind == "" {
+		kind = "posts"
+	}
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.AuthorPosts(
+		r.Context(), viewerID, chi.URLParam(r, "handle"), kind,
+		r.URL.Query().Get("cursor"), limit,
+	)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (h *ContentHandler) Like(w http.ResponseWriter, r *http.Request)   { h.setLike(w, r, true) }
 func (h *ContentHandler) Unlike(w http.ResponseWriter, r *http.Request) { h.setLike(w, r, false) }
 func (h *ContentHandler) setLike(w http.ResponseWriter, r *http.Request, liked bool) {

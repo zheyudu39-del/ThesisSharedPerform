@@ -58,7 +58,15 @@ SELECT
     COALESCE(sd.title, '')::text AS title,
     COALESCE(sd.body, '')::text  AS body,
     ts_rank(sd.tsv, q.tsq)::real AS rank,
-    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity
+    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity,
+    -- slug 是实体的路由段：用户取 handle，群组取 slug，其余为 NULL。
+    -- 搜索结果要靠它拼出 /u/{handle}、/groups/{slug}；只返回 entity_id
+    -- 的话前端没有接口能把它换成可读的地址。
+    (CASE
+      WHEN sd.entity_type = 'user'  THEN (SELECT u.handle FROM users u  WHERE u.id = sd.entity_id AND u.deleted_at IS NULL)
+      WHEN sd.entity_type = 'group' THEN (SELECT g.slug   FROM groups g WHERE g.id = sd.entity_id)
+      ELSE NULL
+    END)::text AS slug
 FROM search_documents sd
 CROSS JOIN q
 -- 不包 COALESCE：title/body 为 NULL 时比较结果为 NULL（等价 false），
@@ -84,7 +92,15 @@ SELECT
     COALESCE(sd.title, '')::text AS title,
     COALESCE(sd.body, '')::text  AS body,
     ts_rank(sd.tsv, q.tsq)::real AS rank,
-    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity
+    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity,
+    -- slug 是实体的路由段：用户取 handle，群组取 slug，其余为 NULL。
+    -- 搜索结果要靠它拼出 /u/{handle}、/groups/{slug}；只返回 entity_id
+    -- 的话前端没有接口能把它换成可读的地址。
+    (CASE
+      WHEN sd.entity_type = 'user'  THEN (SELECT u.handle FROM users u  WHERE u.id = sd.entity_id AND u.deleted_at IS NULL)
+      WHEN sd.entity_type = 'group' THEN (SELECT g.slug   FROM groups g WHERE g.id = sd.entity_id)
+      ELSE NULL
+    END)::text AS slug
 FROM search_documents sd
 CROSS JOIN q
 WHERE (
@@ -123,7 +139,15 @@ SELECT
     COALESCE(sd.title, '')::text AS title,
     COALESCE(sd.body, '')::text  AS body,
     ts_rank(sd.tsv, q.tsq)::real AS rank,
-    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity
+    similarity(COALESCE(sd.title, ''), q.raw)::real AS title_similarity,
+    -- slug 是实体的路由段：用户取 handle，群组取 slug，其余为 NULL。
+    -- 搜索结果要靠它拼出 /u/{handle}、/groups/{slug}；只返回 entity_id
+    -- 的话前端没有接口能把它换成可读的地址。
+    (CASE
+      WHEN sd.entity_type = 'user'  THEN (SELECT u.handle FROM users u  WHERE u.id = sd.entity_id AND u.deleted_at IS NULL)
+      WHEN sd.entity_type = 'group' THEN (SELECT g.slug   FROM groups g WHERE g.id = sd.entity_id)
+      ELSE NULL
+    END)::text AS slug
 FROM search_documents sd
 CROSS JOIN q
 LEFT JOIN posts p  ON sd.entity_type = 'post'  AND p.id = sd.entity_id AND p.deleted_at IS NULL

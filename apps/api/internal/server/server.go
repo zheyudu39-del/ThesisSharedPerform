@@ -67,6 +67,8 @@ func New(d Deps) *http.Server {
 	contentSvc.SetNotifier(contentNotifier{service: notifySvc})
 	contents := handler.NewContentHandler(contentSvc)
 
+	// 账号服务同样接入检索：S-01 要求用户可被搜索，注册与改资料时写索引。
+	authService.SetIndexer(identityIndexer{service: searchSvc})
 	users := handler.NewUserHandler(authService)
 
 	groupSvc := group.NewService(d.Pool)
@@ -329,6 +331,10 @@ func New(d Deps) *http.Server {
 		// 令牌可选：有效会话会让响应附带 following，供关注按钮正确初始化。
 		// 必须最后注册：chi 中静态段优先于参数段，/users/me 仍会命中上面的路由。
 		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/users/{handle}", users.GetPublic)
+
+		// 个人主页的帖子列表（A-03 发帖 / 转发 Tab）。
+		// 与主页同样公开可读：匿名访问时 liked / bookmarked 恒为 false。
+		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/users/{handle}/posts", contents.UserPosts)
 	})
 
 	// 开放 API：独立前缀，用 X-API-Key 认证。
@@ -374,6 +380,20 @@ func (a contentIndexer) Index(ctx context.Context, doc content.SearchDocument) e
 // Indexer 接口保持只有 Index，避免所有现有测试替身都要多实现一个方法。
 func (a contentIndexer) Remove(ctx context.Context, entityType string, entityID uuid.UUID) error {
 	return a.service.Remove(ctx, entityType, entityID)
+}
+
+// identityIndexer 把 search.Service 适配成 identity.Indexer。
+// 用户索引让 S-01 的「搜用户在四个人群里的一条」真正成立——
+// 在此之前 EntityUser 只在常量和白名单里，从未被写入过。
+type identityIndexer struct{ service *search.Service }
+
+func (a identityIndexer) Index(ctx context.Context, doc identity.SearchDocument) error {
+	return a.service.Index(ctx, search.IndexInput{
+		EntityType: doc.EntityType,
+		EntityID:   doc.EntityID,
+		Title:      doc.Title,
+		Body:       doc.Body,
+	})
 }
 
 // groupIndexer 把 search.Service 适配成 group.Indexer。
