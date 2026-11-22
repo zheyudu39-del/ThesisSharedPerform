@@ -305,13 +305,59 @@ func (s *Service) Complete(ctx context.Context, userID, fileID uuid.UUID, sizeBy
 	return s.toFile(ctx, transcoding), nil
 }
 
-// Get 查询自己上传的文件。
+// Get 查询文件元信息。上传者本人，或文件已挂到某篇论文上时可读。
+//
+// 为什么不是「只有上传者」：论文是公开内容，它的全文预览必须对所有访客
+// 可见。只校验 owner 会导致别人打开论文页永远看到「暂无可预览页面」——
+// 实测非上传者拿到的是 404。
 func (s *Service) Get(ctx context.Context, userID, fileID uuid.UUID) (File, error) {
-	record, err := s.ownedFile(ctx, userID, fileID)
+	record, err := s.readableFile(ctx, userID, fileID)
 	if err != nil {
 		return File{}, err
 	}
 	return s.toFile(ctx, record), nil
+}
+
+// OriginalURL 返回原文件的预签名下载地址，并可内联显示。
+//
+// 用途是让非 PDF 文件在站内直接预览（PRD V-04）：图片交给 <img>、
+// Markdown / 代码 / LaTeX 取回文本后渲染。页图只对 PDF 与 Office 有意义，
+// 图片与文本类文件必须能拿到原文件本身。
+//
+// 预签名地址有有效期（见 PageURLTTL），前端应把它当作短时链接使用，
+// 而不是长期缓存的图片地址。
+func (s *Service) OriginalURL(ctx context.Context, userID, fileID uuid.UUID) (OriginalFile, error) {
+	record, err := s.readableFile(ctx, userID, fileID)
+	if err != nil {
+		return OriginalFile{}, err
+	}
+	if s.store == nil {
+		return OriginalFile{}, ErrStorageUnavailable
+	}
+	url, err := s.store.PresignGet(ctx, record.StorageKey, PageURLTTL)
+	if err != nil {
+		return OriginalFile{}, err
+	}
+	return OriginalFile{
+		ID:           uuid.UUID(record.ID.Bytes),
+		OriginalName: record.OriginalName,
+		Mime:         record.Mime,
+		Kind:         string(record.Kind),
+		SizeBytes:    record.SizeBytes,
+		URL:          url,
+		ExpiresIn:    int(PageURLTTL / time.Second),
+	}, nil
+}
+
+// OriginalFile 是原文件直链的响应体。
+type OriginalFile struct {
+	ID           uuid.UUID `json:"id"`
+	OriginalName string    `json:"originalName"`
+	Mime         string    `json:"mime"`
+	Kind         string    `json:"kind"`
+	SizeBytes    int64     `json:"sizeBytes"`
+	URL          string    `json:"url"`
+	ExpiresIn    int       `json:"expiresIn"`
 }
 
 // Pages 分页返回页图的预签名地址。
@@ -323,7 +369,7 @@ func (s *Service) Pages(ctx context.Context, userID, fileID uuid.UUID, page, siz
 		return PagesResult{}, fmt.Errorf("%w: size 须为 1 到 50", ErrValidation)
 	}
 
-	record, err := s.ownedFile(ctx, userID, fileID)
+	record, err := s.readableFile(ctx, userID, fileID)
 	if err != nil {
 		return PagesResult{}, err
 	}
@@ -360,6 +406,31 @@ func (s *Service) Pages(ctx context.Context, userID, fileID uuid.UUID, page, siz
 		pageCount = int(*record.PageCount)
 	}
 	return PagesResult{Pages: pages, Total: total, PageCount: pageCount}, nil
+}
+
+// readableFile 读取文件并校验可读性。
+//
+// 可读有两种情况：
+//  1. 调用者就是上传者；
+//  2. 该文件被某篇论文引用（papers.pdf_file_id）——论文是公开内容，
+//     它的全文预览对所有人可见（PRD V-01 / P-05）。
+//
+// 不存在与无权访问都返回 ErrFileNotFound，避免通过状态码探测文件是否存在。
+func (s *Service) readableFile(ctx context.Context, userID, fileID uuid.UUID) (db.File, error) {
+	record, err := s.queries.GetFileByID(ctx, uuidParam(fileID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.File{}, ErrFileNotFound
+		}
+		return db.File{}, fmt.Errorf("查询文件: %w", err)
+	}
+	if userID != uuid.Nil && uuid.UUID(record.OwnerID.Bytes) == userID {
+		return record, nil
+	}
+	if _, _, _, linked, err := s.paperForFile(ctx, fileID); err == nil && linked {
+		return record, nil
+	}
+	return db.File{}, ErrFileNotFound
 }
 
 // ownedFile 读取文件并校验归属。不存在与无权访问都返回 ErrFileNotFound。

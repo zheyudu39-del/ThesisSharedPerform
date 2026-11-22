@@ -12,6 +12,7 @@ import {
   type GroupFileDTO,
 } from "@/lib/groupfiles";
 import { ApiError } from "@/lib/http";
+import { GroupFilePreview } from "@/components/GroupFilePreview";
 
 /**
  * 群文件库（PRD G-05）。
@@ -149,13 +150,16 @@ export function GroupFiles({ slug, isMember }: { slug: string; isMember: boolean
                     {file.addedBy.name} 存入
                   </p>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void handleDelete(file.id)}
-                  className="shrink-0 rounded-[3px] px-2 py-0.5 text-[0.72rem] text-danger hover:bg-danger-wash"
-                >
-                  移除
-                </button>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  <GroupFilePreview file={file} pageCount={file.pageCount} />
+                  <button
+                    type="button"
+                    onClick={() => void handleDelete(file.id)}
+                    className="rounded-[3px] px-2 py-0.5 text-[0.72rem] text-danger hover:bg-danger-wash"
+                  >
+                    移除
+                  </button>
+                </div>
               </div>
 
               {file.description && (

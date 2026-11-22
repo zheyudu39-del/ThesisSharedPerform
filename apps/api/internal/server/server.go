@@ -292,12 +292,6 @@ func New(d Deps) *http.Server {
 				}
 			})
 
-			// 文件读取：只读，无需 CSRF。
-			if d.Storage != nil {
-				files := handler.NewFileHandlerWithIndexer(file.NewService(d.Pool, d.Storage), searchSvc)
-				r.Get("/files/{id}", files.Get)
-				r.Get("/files/{id}/pages", files.Pages)
-			}
 		})
 
 		// 公开读接口：SSR 与 SEO 的前提（PRD §7.4）。
@@ -335,6 +329,17 @@ func New(d Deps) *http.Server {
 		// 个人主页的帖子列表（A-03 发帖 / 转发 Tab）。
 		// 与主页同样公开可读：匿名访问时 liked / bookmarked 恒为 false。
 		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/users/{handle}/posts", contents.UserPosts)
+
+		// 文件读取：论文全文预览必须对访客可见（PRD V-01 / P-05）。
+		// 挂在 OptionalAuthenticate 下而不是 Authenticate：论文是公开内容，
+		// 要求登录才能看预览等于把论文页做成了登录墙。可读性由服务层判定
+		// ——上传者本人，或该文件已被某篇论文引用。
+		if d.Storage != nil {
+			files := handler.NewFileHandlerWithIndexer(file.NewService(d.Pool, d.Storage), searchSvc)
+			r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/files/{id}", files.Get)
+			r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/files/{id}/pages", files.Pages)
+			r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/files/{id}/original", files.Original)
+		}
 	})
 
 	// 开放 API：独立前缀，用 X-API-Key 认证。

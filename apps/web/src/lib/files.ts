@@ -527,6 +527,40 @@ export function validateUpload(file: File): UploadValidation {
   return { ok: true, mime };
 }
 
+/** 原文件直链（图片 / Markdown / 代码 / LaTeX 预览用）。 */
+export type OriginalFile = {
+  id: string;
+  originalName: string;
+  mime: string;
+  kind: FileKind;
+  sizeBytes: number;
+  /** 短时预签名地址，过期后需要重新拉取。 */
+  url: string;
+  expiresIn: number;
+};
+
+/**
+ * 取原文件的预签名直链。
+ *
+ * 页图（/files/{id}/pages）只对 PDF 与 Office 有意义；图片与文本类文件
+ * 需要原文件本身才能预览（PRD V-04）。
+ */
+export async function getOriginalFile(fileId: string): Promise<OriginalFile> {
+  const body = await apiFetch(`/files/${encodeURIComponent(fileId)}/original`);
+  if (!isRecord(body) || typeof body.id !== "string" || typeof body.url !== "string") {
+    throw invalidResponse();
+  }
+  return {
+    id: body.id,
+    originalName: str(body.originalName),
+    mime: str(body.mime),
+    kind: toKind(body.kind),
+    sizeBytes: num(body.sizeBytes),
+    url: body.url,
+    expiresIn: num(body.expiresIn),
+  };
+}
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];

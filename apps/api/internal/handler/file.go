@@ -70,7 +70,7 @@ func (h *FileHandler) Complete(w http.ResponseWriter, r *http.Request) {
 
 // Get 处理 GET /api/v1/files/{id}。
 func (h *FileHandler) Get(w http.ResponseWriter, r *http.Request) {
-	userID, fileID, ok := h.userAndFile(w, r)
+	userID, fileID, ok := h.userAndFileOptional(w, r)
 	if !ok {
 		return
 	}
@@ -82,9 +82,25 @@ func (h *FileHandler) Get(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"file": record})
 }
 
+// Original 处理 GET /api/v1/files/{id}/original。
+//
+// 返回原文件的短时预签名地址，供图片 / Markdown / 代码 / LaTeX 在站内预览。
+func (h *FileHandler) Original(w http.ResponseWriter, r *http.Request) {
+	userID, fileID, ok := h.userAndFileOptional(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.OriginalURL(r.Context(), userID, fileID)
+	if err != nil {
+		writeFileError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 // Pages 处理 GET /api/v1/files/{id}/pages?page=1&size=10。
 func (h *FileHandler) Pages(w http.ResponseWriter, r *http.Request) {
-	userID, fileID, ok := h.userAndFile(w, r)
+	userID, fileID, ok := h.userAndFileOptional(w, r)
 	if !ok {
 		return
 	}
@@ -102,6 +118,18 @@ func (h *FileHandler) Pages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// userAndFileOptional 用于只读接口：带会话时返回用户 ID，匿名时返回 uuid.Nil。
+// 可读性由服务层判定（上传者本人，或文件已挂到论文上）。
+func (h *FileHandler) userAndFileOptional(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
+	userID, _ := appmiddleware.UserID(r.Context())
+	fileID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		WriteError(w, http.StatusUnprocessableEntity, "validation_error", "文件 ID 格式不正确")
+		return uuid.Nil, uuid.Nil, false
+	}
+	return userID, fileID, true
 }
 
 func (h *FileHandler) userAndFile(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
