@@ -19,6 +19,7 @@ import (
 	"github.com/thesis-shared/api/internal/handler"
 	"github.com/thesis-shared/api/internal/identity"
 	appmiddleware "github.com/thesis-shared/api/internal/middleware"
+	"github.com/thesis-shared/api/internal/admin"
 	"github.com/thesis-shared/api/internal/moderation"
 	"github.com/thesis-shared/api/internal/notify"
 	"github.com/thesis-shared/api/internal/openapi"
@@ -96,6 +97,11 @@ func New(d Deps) *http.Server {
 	moderationSvc := moderation.NewService(d.Pool)
 	moderations := handler.NewModerationHandler(moderationSvc)
 
+	// 运营后台：概览统计、用户管理、内容管理、文件排查。
+	// 权限由 admin 服务层判定（requireAdmin），路由只需保证已登录。
+	adminSvc := admin.NewService(d.Pool)
+	admins := handler.NewAdminHandler(adminSvc)
+
 	// 引用管理（PRD D-06）与群文件库（PRD G-05）。
 	// 两者都通过适配器注入 Querier：领域包不直接依赖 sqlc 生成类型。
 	citationSvc := citation.NewService(citation.NewPGQuerier(d.Pool))
@@ -148,6 +154,18 @@ func New(d Deps) *http.Server {
 			r.Get("/reports", moderations.ListReports)
 			r.Get("/blocks", moderations.ListBlocks)
 			r.Get("/users/{handle}/block", moderations.GetBlockStatus)
+
+			// 运营后台只读：概览统计、用户与内容列表、文件排查。
+			// 与 /reports 一样，角色判定在服务层——未登录在这里已被拦下，
+			// 非运营会拿到 403，而不是「接口不存在」。
+			r.Route("/admin", func(r chi.Router) {
+				r.Get("/overview", admins.Overview)
+				r.Get("/users", admins.Users)
+				r.Get("/posts", admins.Posts)
+				r.Get("/papers", admins.Papers)
+				r.Get("/groups", admins.Groups)
+				r.Get("/files", admins.Files)
+			})
 
 			// 开放 API 密钥只读：只返回元数据（前缀、scopes、最后使用时间），
 			// 不含明文或哈希，因此与其它只读接口一样不需要 CSRF。
@@ -225,6 +243,15 @@ func New(d Deps) *http.Server {
 				r.Patch("/reports/{id}", moderations.UpdateReport)
 				r.Post("/users/{handle}/block", moderations.Block)
 				r.Delete("/users/{handle}/block", moderations.Unblock)
+
+				// 运营后台写操作。这些都会改变他人数据，必须带 CSRF 令牌，
+				// 且服务层会再次确认调用者是运营。
+				r.Patch("/admin/users/{id}/role", admins.UpdateUserRole)
+				r.Patch("/admin/users/{id}/status", admins.UpdateUserStatus)
+				r.Delete("/admin/posts/{id}", admins.DeletePost)
+				r.Post("/admin/posts/{id}/restore", admins.RestorePost)
+				r.Delete("/admin/groups/{id}", admins.DeleteGroup)
+				r.Post("/admin/groups/{id}/restore", admins.RestoreGroup)
 
 				// 群组写操作。建群、改群、成员与角色、邀请码、入群申请都在这里；
 				// 具体权限（owner > admin > member）由 group 服务层判定。

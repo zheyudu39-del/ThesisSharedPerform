@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
-import { RequireAuth } from "@/components/RequireAuth";
 import { ApiError } from "@/lib/http";
 import {
   listReports,
@@ -46,12 +45,10 @@ function targetHref(report: ReportDTO): string | null {
   return null;
 }
 
+// 登录态与 403 判定由 app/admin/layout.tsx 的 AdminShell 统一处理，
+// 这里不再重复包 RequireAuth——否则嵌套两层会让未登录时闪两次加载态。
 export function AdminReportsWorkspace() {
-  return (
-    <RequireAuth>
-      <ReportsPanel />
-    </RequireAuth>
-  );
+  return <ReportsPanel />;
 }
 
 function ReportsPanel() {
