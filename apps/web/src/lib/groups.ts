@@ -237,7 +237,7 @@ export async function createGroup(input: CreateGroupInput): Promise<GroupDTO> {
   };
   if (input.description !== undefined) payload.description = input.description;
 
-  const body = await apiFetch("/groups", { method: "POST", body: JSON.stringify(payload) });
+  const body = await apiFetch("/groups", { method: "POST", body: payload });
   if (!isRecord(body) || !("group" in body)) throw invalidResponse();
   return normalizeGroup(body.group);
 }
@@ -281,7 +281,7 @@ export async function listGroups(
 export async function updateGroup(slug: string, input: UpdateGroupInput): Promise<GroupDTO> {
   const body = await apiFetch(`/groups/${encodeURIComponent(slug)}`, {
     method: "PATCH",
-    body: JSON.stringify(input),
+    body: input,
   });
   if (!isRecord(body) || !("group" in body)) throw invalidResponse();
   return normalizeGroup(body.group);
@@ -315,7 +315,7 @@ export async function updateMemberRole(
 ): Promise<MemberDTO> {
   const body = await apiFetch(
     `/groups/${encodeURIComponent(slug)}/members/${encodeURIComponent(userId)}`,
-    { method: "PATCH", body: JSON.stringify({ role }) },
+    { method: "PATCH", body: { role } },
   );
   if (!isRecord(body) || !("member" in body)) throw invalidResponse();
   return normalizeMember(body.member);
@@ -344,7 +344,7 @@ export async function createInvite(
 
   const body = await apiFetch(`/groups/${encodeURIComponent(slug)}/invites`, {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: payload,
   });
   if (!isRecord(body) || !("invite" in body)) throw invalidResponse();
   return normalizeInvite(body.invite);
@@ -354,7 +354,7 @@ export async function createInvite(
 export async function joinByCode(code: string): Promise<GroupDTO> {
   const body = await apiFetch("/groups/join", {
     method: "POST",
-    body: JSON.stringify({ code: code.trim() }),
+    body: { code: code.trim() },
   });
   if (!isRecord(body) || !("group" in body)) throw invalidResponse();
   return normalizeGroup(body.group);
@@ -387,7 +387,7 @@ export async function requestJoin(
 
   const body = await apiFetch(`/groups/${encodeURIComponent(slug)}/requests`, {
     method: "POST",
-    body: JSON.stringify(payload),
+    body: payload,
   });
   if (!isRecord(body) || !isRecord(body.request)) throw invalidResponse();
   return {

@@ -46,7 +46,12 @@ function isMutating(method: string): boolean {
 
 export type ApiFetchOptions = {
   method?: string;
-  body?: unknown;
+  /**
+   * 请求体。传对象即可，由 apiFetch 统一序列化——**不要**自己 JSON.stringify，
+   * 否则会双重编码（历史上 19 处调用点都这么写，导致上传论文 422）。
+   * 需要发送二进制/表单时用 rawBody。
+   */
+  body?: Record<string, unknown>;
   /** 已构造好的请求体（如 FormData），与 body 互斥。 */
   rawBody?: BodyInit;
   headers?: HeadersInit;

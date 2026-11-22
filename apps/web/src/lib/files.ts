@@ -306,7 +306,7 @@ export async function presignFile(
 ): Promise<PresignResult> {
   const body = await apiFetch("/files/presign", {
       method: "POST",
-      body: JSON.stringify({ filename, mime, sizeBytes }),
+      body: { filename, mime, sizeBytes },
     });
   return normalizePresign(body);
 }
@@ -408,7 +408,7 @@ function uploadHttpError(status: number): ApiError {
 
 /** 第 3 步：通知服务端上传完成，服务端会核对对象真实存在与大小并触发转码。 */
 export async function completeUpload(fileId: string, sizeBytes: number): Promise<FileDTO> {
-  const body = await apiFetch(`/files/${encodeURIComponent(fileId)}/complete`, { method: "POST", body: JSON.stringify({ sizeBytes }) });
+  const body = await apiFetch(`/files/${encodeURIComponent(fileId)}/complete`, { method: "POST", body: { sizeBytes } });
   if (!isRecord(body) || !("file" in body)) throw invalidResponse();
   return normalizeFile(body.file);
 }

@@ -237,7 +237,7 @@ export async function unfollowUser(handle: string): Promise<FollowResult> {
  * 服务端按请求体中出现的字段更新。成功后返回完整私有 DTO。
  */
 export async function updateProfile(input: ProfileUpdateInput): Promise<UserDTO> {
-  const body = await apiFetch("/users/me", { method: "PATCH", body: JSON.stringify(input) });
+  const body = await apiFetch("/users/me", { method: "PATCH", body: input });
   if (!isRecord(body) || !isRecord(body.user)) throw invalidResponse();
   const user = body.user;
   if (typeof user.id !== "string" || typeof user.name !== "string") throw invalidResponse();

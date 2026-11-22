@@ -59,7 +59,7 @@ function extractError(body: unknown): { code: string; message: string } {
 export async function resolvePaper(input: string): Promise<ResolveResult> {
   const body = await apiFetch("/papers/resolve", {
     method: "POST",
-    body: JSON.stringify({ input: input.trim() }),
+    body: { input: input.trim() },
   });
 
   if (
@@ -91,7 +91,7 @@ export type UpdatePaperInput = {
 export async function updatePaper(id: string, input: UpdatePaperInput): Promise<PaperDTO> {
   const body = await apiFetch(`/papers/${encodeURIComponent(id)}`, {
     method: "PATCH",
-    body: JSON.stringify(input),
+    body: input,
   });
   if (typeof body !== "object" || body === null) {
     throw new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);
@@ -119,7 +119,7 @@ export type MergeResult = {
 export async function mergePapers(keepId: string, duplicateId: string): Promise<MergeResult> {
   const body = await apiFetch(`/papers/${encodeURIComponent(keepId)}/merge`, {
     method: "POST",
-    body: JSON.stringify({ duplicateId }),
+    body: { duplicateId },
   });
   if (typeof body !== "object" || body === null) {
     throw new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);
@@ -153,7 +153,7 @@ export async function createManualPaper(
 ): Promise<ResolveResult> {
   const body = await apiFetch("/papers", {
     method: "POST",
-    body: JSON.stringify(input),
+    body: input,
   });
   if (
     typeof body !== "object" ||
@@ -187,7 +187,7 @@ export async function listPapers(limit = 20, offset = 0): Promise<PaperList> {
 export async function setPaperPDFFile(paperId: string, fileId: string | null): Promise<PaperDTO> {
   const body = await apiFetch(`/papers/${encodeURIComponent(paperId)}/pdf`, {
     method: "PATCH",
-    body: JSON.stringify({ fileId }),
+    body: { fileId },
   });
   if (typeof body !== "object" || body === null) {
     throw new ApiError("invalid_response", "服务器返回了无法识别的响应。", 0);

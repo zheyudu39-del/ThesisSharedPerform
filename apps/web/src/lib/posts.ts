@@ -482,7 +482,7 @@ export async function createPost(input: CreatePostInput): Promise<PostDTO> {
   if (input.tags && input.tags.length > 0) payload.tags = input.tags;
   if (input.fileIds && input.fileIds.length > 0) payload.fileIds = input.fileIds;
 
-  const body = await apiFetch("/posts", { method: "POST", body: JSON.stringify(payload) });
+  const body = await apiFetch("/posts", { method: "POST", body: payload });
   if (!isRecord(body) || !("post" in body)) throw invalidResponse();
   return normalizePost(body.post);
 }
@@ -510,7 +510,7 @@ export async function updatePost(id: string, input: UpdatePostInput): Promise<Po
 
   const body = await apiFetch(`/posts/${encodeURIComponent(id)}`, {
     method: "PATCH",
-    body: JSON.stringify(payload),
+    body: payload,
   });
   if (!isRecord(body) || !("post" in body)) throw invalidResponse();
   return normalizePost(body.post);
@@ -580,7 +580,7 @@ export async function createComment(
   // 契约允许显式传 null 表示一级评论；只在有父评论时才带上字段。
   if (input.parentId) payload.parentId = input.parentId;
 
-  const body = await apiFetch(`/posts/${encodeURIComponent(postId)}/comments`, { method: "POST", body: JSON.stringify(payload) });
+  const body = await apiFetch(`/posts/${encodeURIComponent(postId)}/comments`, { method: "POST", body: payload });
   if (!isRecord(body) || !("comment" in body)) throw invalidResponse();
   return normalizeComment(body.comment);
 }

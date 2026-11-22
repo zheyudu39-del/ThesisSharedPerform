@@ -208,7 +208,7 @@ export async function createReport(input: {
   const detail = input.detail?.trim();
   if (detail) payload.detail = detail;
 
-  const body = await apiFetch("/reports", { method: "POST", body: JSON.stringify(payload) });
+  const body = await apiFetch("/reports", { method: "POST", body: payload });
   if (!isRecord(body) || !("report" in body)) throw invalidResponse();
   return normalizeReport(body.report);
 }
@@ -238,7 +238,7 @@ export async function updateReportStatus(
 ): Promise<ReportDTO> {
   const body = await apiFetch(`/reports/${encodeURIComponent(id)}`, {
     method: "PATCH",
-    body: JSON.stringify({ status }),
+    body: { status },
   });
   if (!isRecord(body) || !("report" in body)) throw invalidResponse();
   return normalizeReport(body.report);
