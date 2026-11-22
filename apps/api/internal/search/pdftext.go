@@ -670,7 +670,13 @@ func hexValue(c byte) int {
 	}
 }
 
-// normalizeWhitespace 统一换行、压缩空白，避免提取结果里出现大量空行。
+// normalizeWhitespace 统一换行、压缩空白，并剔除不能进入数据库的字符。
+//
+// NUL 必须在这里清掉：PDF 允许文本串里出现 \000（部分生成器用它表示缺字），
+// 而 PostgreSQL 的 text 列不接受 0x00，写入会报 SQLSTATE 22021
+// 「无效的 "UTF8" 编码字节顺序: 0x00」。Word 经 LibreOffice 转出的 PDF
+// 经常带这种字符，之前表现为「索引文件文本层失败」，全文检索静默失效。
+// 其余 C0 控制字符同样无检索价值，一并转成空格。
 func normalizeWhitespace(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
@@ -687,6 +693,15 @@ func normalizeWhitespace(s string) string {
 		case '\n':
 			spaceRun = 0
 			newlineRun++
+			continue
+		case 0:
+			// NUL 视作词间分隔，不保留也不吞掉相邻文字。
+			spaceRun++
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			// 其它控制字符：替换为空格，避免整段文本被数据库拒绝。
+			spaceRun++
 			continue
 		}
 		if spaceRun > 0 && b.Len() > 0 {

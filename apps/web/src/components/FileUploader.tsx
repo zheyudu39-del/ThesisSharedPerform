@@ -23,7 +23,6 @@ import {
 type UploadState =
   | { phase: "idle" }
   | { phase: "uploading"; percent: number; name: string; size: number }
-  | { phase: "done"; file: FileDTO }
   | { phase: "error"; message: string };
 
 export type FileUploaderProps = {
@@ -94,7 +93,12 @@ export function FileUploader({
           },
         });
         if (!mountedRef.current) return;
-        setState({ phase: "done", file: uploaded });
+        // 上传成功即回到 idle，让同一个上传器可以连续上传多个文件。
+        //
+        // 之前停在 done，而 done 分支渲染的是「换一个」按钮，没有拖拽与
+        // 点击处理——发帖框里传完第一个附件后，那块区域就再也接不了新文件，
+        // 用户看到的就是「只能发一篇」。调用方仍然通过 onUploaded 拿到结果。
+        setState({ phase: "idle" });
         onUploaded?.(uploaded);
       } catch (err) {
         if (!mountedRef.current) return;
@@ -212,32 +216,6 @@ export function FileUploader({
           <p className="mt-1.5 text-right font-mono text-[0.68rem] tabular-nums text-ink-3">
             {state.percent < 100 ? `上传中 ${state.percent}%` : "正在校验并转码…"}
           </p>
-        </div>
-      ) : state.phase === "done" ? (
-        <div className="flex items-center gap-2.5 rounded-[6px] border border-good/40 bg-good-wash px-3.5 py-2.5">
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            className="size-4 shrink-0 text-good"
-            aria-hidden
-          >
-            <path d="m20 6-11 11-5-5" />
-          </svg>
-          <span className="min-w-0 flex-1 truncate text-[0.82rem] text-ink">
-            {state.file.originalName}
-          </span>
-          <span className="shrink-0 font-mono text-[0.68rem] text-ink-3">
-            {formatBytes(state.file.sizeBytes)}
-          </span>
-          <button
-            type="button"
-            onClick={reset}
-            className="shrink-0 rounded-[3px] px-1.5 py-0.5 font-mono text-[0.68rem] text-ink-2 hover:bg-surface hover:text-ink"
-          >
-            换一个
-          </button>
         </div>
       ) : (
         <button
