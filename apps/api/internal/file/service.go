@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/thesis-shared/api/internal/db"
 	"github.com/thesis-shared/api/internal/search"
+	"github.com/thesis-shared/api/internal/storage"
 )
 
 var (
@@ -49,6 +50,55 @@ const (
 	// maxErrorReason 限制写入 error_reason 的长度，避免把整段 stderr 塞进库。
 	maxErrorReason = 500
 )
+
+// storeErrors 把对象存储层的「暂不可用」翻译成本包的 ErrStorageUnavailable。
+//
+// 两个包对同一件事各有自己的哨兵错误（storage 不该依赖 file，反之亦然），
+// 在边界处统一翻译，handler 才能只判断一个错误就返回 503。
+type storeErrors struct{ inner ObjectStore }
+
+func (s storeErrors) PresignPut(ctx context.Context, key, contentType string, ttl time.Duration) (string, error) {
+	url, err := s.inner.PresignPut(ctx, key, contentType, ttl)
+	return url, mapStorageErr(err)
+}
+
+func (s storeErrors) PresignGet(ctx context.Context, key string, ttl time.Duration) (string, error) {
+	url, err := s.inner.PresignGet(ctx, key, ttl)
+	return url, mapStorageErr(err)
+}
+
+func (s storeErrors) Stat(ctx context.Context, key string) (int64, bool, error) {
+	size, exists, err := s.inner.Stat(ctx, key)
+	return size, exists, mapStorageErr(err)
+}
+
+func (s storeErrors) Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
+	return mapStorageErr(s.inner.Put(ctx, key, r, size, contentType))
+}
+
+func (s storeErrors) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	rc, err := s.inner.Get(ctx, key)
+	return rc, mapStorageErr(err)
+}
+
+func mapStorageErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, storage.ErrUnavailable) {
+		return fmt.Errorf("%w: %v", ErrStorageUnavailable, err)
+	}
+	return err
+}
+
+// wrapStore 在 store 非 nil 时套上错误翻译；nil 保持 nil，
+// 让「未配置」与「配置了但连不上」在调用点仍然可分。
+func wrapStore(store ObjectStore) ObjectStore {
+	if store == nil {
+		return nil
+	}
+	return storeErrors{inner: store}
+}
 
 // ObjectStore 是服务对对象存储的最小依赖，便于单元测试替身。
 type ObjectStore interface {
@@ -149,7 +199,7 @@ func NewService(pool *pgxpool.Pool, store ObjectStore) *Service {
 	return &Service{
 		pool:    pool,
 		queries: db.New(pool),
-		store:   store,
+		store:   wrapStore(store),
 		sem:     make(chan struct{}, maxTranscodes),
 		now:     time.Now,
 	}
@@ -159,7 +209,7 @@ func NewService(pool *pgxpool.Pool, store ObjectStore) *Service {
 func NewServiceWithDeps(q Querier, store ObjectStore) *Service {
 	return &Service{
 		queries: q,
-		store:   store,
+		store:   wrapStore(store),
 		sem:     make(chan struct{}, maxTranscodes),
 		now:     time.Now,
 	}

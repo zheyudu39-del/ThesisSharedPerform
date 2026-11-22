@@ -44,8 +44,12 @@ func main() {
 	defer pool.Close()
 	slog.Info("database connected")
 
-	// 对象存储是可选依赖：初始化失败只降级文件功能，不影响其余接口。
-	// 这样本地没启动 S3 时仍可开发信息流、论文解析等功能。
+	// 对象存储是可选依赖：配置缺失只降级文件功能，不影响其余接口。
+	//
+	// 注意这里**不**用「启动时能否连上 S3」决定是否启用文件功能。本地开发
+	// 常见顺序是 API 先起、S3 后起（Docker 刚启动时尤其如此），旧写法会让
+	// /files/presign 路由根本不注册，前端上传直接 404，且必须重启 API 才能
+	// 恢复。桶的确认改为在首次使用存储时惰性完成，失败返回 503 并自动重试。
 	var store *storage.Client
 	if sc, err := storage.New(storage.Config{
 		Endpoint:  cfg.S3Endpoint,
@@ -54,12 +58,13 @@ func main() {
 		Bucket:    cfg.S3Bucket,
 		UseSSL:    cfg.S3UseSSL,
 	}); err != nil {
-		slog.Warn("对象存储不可用，文件上传功能已禁用", "err", err)
+		slog.Warn("对象存储未配置，文件上传功能已禁用", "err", err)
 	} else {
+		store = sc
+		// 启动时探测一次，只用于打日志；失败不影响启用。
 		if err := sc.EnsureBucket(ctx); err != nil {
-			slog.Warn("无法确认存储桶，文件上传功能已禁用", "err", err)
+			slog.Warn("对象存储暂不可用，文件接口将返回 503 并在后台重试", "err", err, "endpoint", cfg.S3Endpoint)
 		} else {
-			store = sc
 			slog.Info("对象存储已连接", "endpoint", cfg.S3Endpoint, "bucket", cfg.S3Bucket)
 		}
 	}
