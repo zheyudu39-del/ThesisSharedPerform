@@ -355,6 +355,45 @@ func (s *Service) Complete(ctx context.Context, userID, fileID uuid.UUID, sizeBy
 	return s.toFile(ctx, transcoding), nil
 }
 
+// RetryTranscode 重新触发一次转码，供运营在文件排查页使用。
+//
+// 只接受 failed 状态：transcoding 再点一次会并发跑两份 pdftoppm，
+// ready 没有必要重跑，pending/uploading 说明对象还没上传完。
+// MarkFileTranscoding 的 WHERE 子句本身就限定 uploaded/failed，
+// 因此这里显式检查状态只是为了给出可读的错误，而不是依赖行数为 0。
+//
+// 注意：这里的权限由 handler 层的运营校验负责，file 服务不感知角色——
+// 与 Presign/Complete 一样只做「文件归属」判断，后台场景由 handler 把关。
+func (s *Service) RetryTranscode(ctx context.Context, fileID uuid.UUID) (File, error) {
+	if s.store == nil {
+		return File{}, ErrStorageUnavailable
+	}
+	record, err := s.queries.GetFileByID(ctx, uuidParam(fileID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return File{}, ErrFileNotFound
+		}
+		return File{}, fmt.Errorf("查询文件: %w", err)
+	}
+	if record.Status != db.FileStatusFailed {
+		return File{}, fmt.Errorf("%w: 只有处理失败的文件可以重试（当前 %s）", ErrValidation, record.Status)
+	}
+	if !needsTranscode(string(record.Kind)) {
+		return File{}, fmt.Errorf("%w: 该类型不需要转码", ErrValidation)
+	}
+
+	transcoding, err := s.queries.MarkFileTranscoding(ctx, uuidParam(fileID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return File{}, fmt.Errorf("%w: 文件状态已变化，请刷新后重试", ErrValidation)
+		}
+		return File{}, fmt.Errorf("更新文件状态: %w", err)
+	}
+
+	s.startTranscode(fileID, record.StorageKey, string(record.Kind))
+	return s.toFile(ctx, transcoding), nil
+}
+
 // Get 查询文件元信息。上传者本人，或文件已挂到某篇论文上时可读。
 //
 // 为什么不是「只有上传者」：论文是公开内容，它的全文预览必须对所有访客

@@ -62,6 +62,18 @@ func (p *pgQuerier) AdminListPapers(ctx context.Context, arg db.AdminListPapersP
 	return p.q.AdminListPapers(ctx, arg)
 }
 
+func (p *pgQuerier) AdminListComments(ctx context.Context, arg db.AdminListCommentsParams) ([]db.AdminListCommentsRow, error) {
+	return p.q.AdminListComments(ctx, arg)
+}
+
+func (p *pgQuerier) AdminSoftDeleteComment(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	return p.q.AdminSoftDeleteComment(ctx, id)
+}
+
+func (p *pgQuerier) AdminRestoreComment(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	return p.q.AdminRestoreComment(ctx, id)
+}
+
 func (p *pgQuerier) AdminListGroups(ctx context.Context, arg db.AdminListGroupsParams) ([]db.AdminListGroupsRow, error) {
 	return p.q.AdminListGroups(ctx, arg)
 }

@@ -74,6 +74,17 @@ func (f *fakeQuerier) AdminListPosts(context.Context, db.AdminListPostsParams) (
 func (f *fakeQuerier) AdminListPapers(context.Context, db.AdminListPapersParams) ([]db.AdminListPapersRow, error) {
 	return nil, nil
 }
+func (f *fakeQuerier) AdminListComments(context.Context, db.AdminListCommentsParams) ([]db.AdminListCommentsRow, error) {
+	return nil, nil
+}
+func (f *fakeQuerier) AdminSoftDeleteComment(context.Context, pgtype.UUID) (pgtype.UUID, error) {
+	f.deleteCalls++
+	return pgtype.UUID{}, nil
+}
+func (f *fakeQuerier) AdminRestoreComment(context.Context, pgtype.UUID) (pgtype.UUID, error) {
+	f.restoreCalls++
+	return pgtype.UUID{}, nil
+}
 func (f *fakeQuerier) AdminListGroups(context.Context, db.AdminListGroupsParams) ([]db.AdminListGroupsRow, error) {
 	return nil, nil
 }
@@ -117,6 +128,10 @@ func TestNonAdminIsRejected(t *testing.T) {
 	cases["deletePost"] = s.DeletePost(ctx, adminID, targetID)
 	cases["restorePost"] = s.RestorePost(ctx, adminID, targetID)
 	cases["deleteGroup"] = s.DeleteGroup(ctx, adminID, targetID)
+	cases["comments"] = nil
+	_, cases["comments"] = s.ListComments(ctx, adminID, ContentFilter{})
+	cases["deleteComment"] = s.DeleteComment(ctx, adminID, targetID)
+	cases["restoreComment"] = s.RestoreComment(ctx, adminID, targetID)
 
 	for name, err := range cases {
 		if !errors.Is(err, ErrForbidden) {

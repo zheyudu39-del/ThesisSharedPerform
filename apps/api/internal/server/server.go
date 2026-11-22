@@ -102,6 +102,12 @@ func New(d Deps) *http.Server {
 	adminSvc := admin.NewService(d.Pool)
 	admins := handler.NewAdminHandler(adminSvc)
 
+	// 后台的「重新转码」需要文件服务。对象存储不可用时 d.Storage 为 nil，
+	// 此时不注入，接口会返回 503，其余后台功能照常。
+	if d.Storage != nil {
+		admins.SetFileService(file.NewService(d.Pool, d.Storage))
+	}
+
 	// 引用管理（PRD D-06）与群文件库（PRD G-05）。
 	// 两者都通过适配器注入 Querier：领域包不直接依赖 sqlc 生成类型。
 	citationSvc := citation.NewService(citation.NewPGQuerier(d.Pool))
@@ -163,6 +169,7 @@ func New(d Deps) *http.Server {
 				r.Get("/users", admins.Users)
 				r.Get("/posts", admins.Posts)
 				r.Get("/papers", admins.Papers)
+				r.Get("/comments", admins.Comments)
 				r.Get("/groups", admins.Groups)
 				r.Get("/files", admins.Files)
 			})
@@ -250,8 +257,11 @@ func New(d Deps) *http.Server {
 				r.Patch("/admin/users/{id}/status", admins.UpdateUserStatus)
 				r.Delete("/admin/posts/{id}", admins.DeletePost)
 				r.Post("/admin/posts/{id}/restore", admins.RestorePost)
+				r.Delete("/admin/comments/{id}", admins.DeleteComment)
+				r.Post("/admin/comments/{id}/restore", admins.RestoreComment)
 				r.Delete("/admin/groups/{id}", admins.DeleteGroup)
 				r.Post("/admin/groups/{id}/restore", admins.RestoreGroup)
+				r.Post("/admin/files/{id}/retry", admins.RetryFile)
 
 				// 群组写操作。建群、改群、成员与角色、邀请码、入群申请都在这里；
 				// 具体权限（owner > admin > member）由 group 服务层判定。

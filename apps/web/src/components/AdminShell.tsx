@@ -21,6 +21,7 @@ const NAV = [
   { href: "/admin", label: "概览", hint: "总量与趋势" },
   { href: "/admin/users", label: "用户", hint: "账号与权限" },
   { href: "/admin/posts", label: "帖子", hint: "内容管理" },
+  { href: "/admin/comments", label: "评论", hint: "评论管理" },
   { href: "/admin/papers", label: "论文", hint: "论文库" },
   { href: "/admin/groups", label: "群组", hint: "群组管理" },
   { href: "/admin/files", label: "文件", hint: "上传与转码" },

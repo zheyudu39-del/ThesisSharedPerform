@@ -144,6 +144,91 @@ func (q *Queries) AdminIsAdmin(ctx context.Context, userID pgtype.UUID) (bool, e
 	return column_1, err
 }
 
+const adminListComments = `-- name: AdminListComments :many
+
+SELECT c.id, c.post_id, c.parent_id, c.author_id,
+       u.handle AS author_handle, u.name AS author_name,
+       left(c.content_text, 200)::text AS excerpt,
+       c.like_count, c.created_at, c.deleted_at,
+       p.visibility AS post_visibility, p.deleted_at AS post_deleted_at
+FROM comments c
+JOIN users u ON u.id = c.author_id
+JOIN posts p ON p.id = c.post_id
+WHERE ($1::boolean IS NOT TRUE AND c.deleted_at IS NULL)
+  AND ($2::text IS NULL OR c.content_text ILIKE $2::text)
+  AND ($3::timestamptz IS NULL
+       OR (c.created_at, c.id) < ($3::timestamptz, $4::uuid))
+ORDER BY c.created_at DESC, c.id DESC
+LIMIT $5::int
+`
+
+type AdminListCommentsParams struct {
+	IncludeDeleted *bool              `json:"include_deleted"`
+	Query          *string            `json:"query"`
+	CursorAt       pgtype.Timestamptz `json:"cursor_at"`
+	CursorID       pgtype.UUID        `json:"cursor_id"`
+	LimitCount     int32              `json:"limit_count"`
+}
+
+type AdminListCommentsRow struct {
+	ID             pgtype.UUID        `json:"id"`
+	PostID         pgtype.UUID        `json:"post_id"`
+	ParentID       pgtype.UUID        `json:"parent_id"`
+	AuthorID       pgtype.UUID        `json:"author_id"`
+	AuthorHandle   string             `json:"author_handle"`
+	AuthorName     string             `json:"author_name"`
+	Excerpt        string             `json:"excerpt"`
+	LikeCount      int32              `json:"like_count"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	DeletedAt      pgtype.Timestamptz `json:"deleted_at"`
+	PostVisibility PostVisibility     `json:"post_visibility"`
+	PostDeletedAt  pgtype.Timestamptz `json:"post_deleted_at"`
+}
+
+// ---------------------------------------------------------------------------
+// 评论管理
+// ---------------------------------------------------------------------------
+// 评论管理列表：按创建时间倒序，支持正文模糊搜索与「含已删除」。
+// 与帖子列表保持同一套游标语义（created_at, id）。
+func (q *Queries) AdminListComments(ctx context.Context, arg AdminListCommentsParams) ([]AdminListCommentsRow, error) {
+	rows, err := q.db.Query(ctx, adminListComments,
+		arg.IncludeDeleted,
+		arg.Query,
+		arg.CursorAt,
+		arg.CursorID,
+		arg.LimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AdminListCommentsRow
+	for rows.Next() {
+		var i AdminListCommentsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.PostID,
+			&i.ParentID,
+			&i.AuthorID,
+			&i.AuthorHandle,
+			&i.AuthorName,
+			&i.Excerpt,
+			&i.LikeCount,
+			&i.CreatedAt,
+			&i.DeletedAt,
+			&i.PostVisibility,
+			&i.PostDeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const adminListFiles = `-- name: AdminListFiles :many
 
 SELECT f.id, f.owner_id, u.handle AS owner_handle, u.name AS owner_name,
@@ -635,6 +720,24 @@ func (q *Queries) AdminOverviewTotals(ctx context.Context) (AdminOverviewTotalsR
 	return i, err
 }
 
+const adminRestoreComment = `-- name: AdminRestoreComment :one
+WITH target AS (
+    UPDATE comments SET deleted_at = NULL
+    WHERE comments.id = $1 AND comments.deleted_at IS NOT NULL
+    RETURNING comments.post_id
+)
+UPDATE posts SET comment_count = posts.comment_count + 1, updated_at = now()
+WHERE posts.id = (SELECT post_id FROM target)
+RETURNING posts.id
+`
+
+// 恢复评论并补回计数。
+func (q *Queries) AdminRestoreComment(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, adminRestoreComment, id)
+	err := row.Scan(&id)
+	return id, err
+}
+
 const adminRestoreGroup = `-- name: AdminRestoreGroup :one
 UPDATE groups SET deleted_at = NULL
 WHERE id = $1 AND deleted_at IS NOT NULL
@@ -732,6 +835,28 @@ func (q *Queries) AdminSetUserStatus(ctx context.Context, arg AdminSetUserStatus
 		&i.Status,
 	)
 	return i, err
+}
+
+const adminSoftDeleteComment = `-- name: AdminSoftDeleteComment :one
+WITH target AS (
+    UPDATE comments SET deleted_at = now()
+    WHERE comments.id = $1 AND comments.deleted_at IS NULL
+    RETURNING comments.post_id
+)
+UPDATE posts SET comment_count = GREATEST(posts.comment_count - 1, 0), updated_at = now()
+WHERE posts.id = (SELECT post_id FROM target)
+RETURNING posts.id
+`
+
+// 软删除评论并同步减少帖子的 comment_count。
+//
+// 为什么在这里改计数而不是依赖触发器：项目其它计数（like_count 等）
+// 都在应用层维护，保持同一套约定，避免出现两套口径。
+// GREATEST(..., 0) 兜底：历史数据里若有计数漂移，减法不能让计数变负。
+func (q *Queries) AdminSoftDeleteComment(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, adminSoftDeleteComment, id)
+	err := row.Scan(&id)
+	return id, err
 }
 
 const adminSoftDeleteGroup = `-- name: AdminSoftDeleteGroup :one

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { listAdminFiles, type AdminFile, type FileStat } from "@/lib/admin";
+import { listAdminFiles, retryAdminFile, type AdminFile, type FileStat } from "@/lib/admin";
 import { ApiError } from "@/lib/http";
 import {
   AdminEmpty,
@@ -60,6 +60,32 @@ export function AdminFilesPanel() {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [actingId, setActingId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function handleRetry(file: AdminFile) {
+    if (actingId) return;
+    setActingId(file.id);
+    setError(null);
+    setNotice(null);
+    try {
+      await retryAdminFile(file.id);
+      // 转码在服务端后台跑，这里先把状态改掉，用户能看到立即反馈；
+      // 结果（ready / 再次 failed）需要刷新列表才准确。
+      setFiles((prev) =>
+        prev.map((f) =>
+          f.id === file.id
+            ? { ...f, status: "transcoding", errorReason: "", retryCount: f.retryCount + 1 }
+            : f,
+        ),
+      );
+      setNotice(`「${file.originalName}」已重新提交转码，稍后刷新查看结果。`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "重试失败，请稍后重试。");
+    } finally {
+      setActingId(null);
+    }
+  }
 
   const load = useCallback(
     async (next: string | null, append: boolean) => {
@@ -136,6 +162,11 @@ export function AdminFilesPanel() {
       </div>
 
       {error && <AdminError message={error} onRetry={() => void load(null, false)} />}
+      {notice && (
+        <p role="status" className="mb-4 rounded-[6px] border border-good/40 bg-good-wash px-3.5 py-2.5 text-[0.82rem] text-good">
+          {notice}
+        </p>
+      )}
 
       {loading ? (
         <AdminSkeleton rows={5} />
@@ -162,6 +193,16 @@ export function AdminFilesPanel() {
                 <span className="ml-auto font-mono text-[0.68rem] text-ink-3">
                   {formatDateTime(f.createdAt)}
                 </span>
+                {f.status === "failed" && (
+                  <button
+                    type="button"
+                    disabled={actingId === f.id}
+                    onClick={() => void handleRetry(f)}
+                    className="rounded-[4px] border border-warn/50 px-2 py-1 font-mono text-[0.68rem] text-warn hover:bg-warn-wash disabled:opacity-40"
+                  >
+                    {actingId === f.id ? "重试中…" : "重新转码"}
+                  </button>
+                )}
               </div>
 
               <div className="flex flex-wrap items-center gap-3">

@@ -360,6 +360,60 @@ export async function restoreAdminPost(id: string): Promise<void> {
   await apiFetch(`/admin/posts/${encodeURIComponent(id)}/restore`, { method: "POST" });
 }
 
+export type AdminComment = {
+  id: string;
+  postId: string;
+  parentId: string | null;
+  authorId: string;
+  authorHandle: string;
+  authorName: string;
+  excerpt: string;
+  likeCount: number;
+  createdAt: string;
+  deletedAt: string | null;
+  postVisibility: string;
+  postDeleted: boolean;
+};
+
+export type AdminCommentPage = { comments: AdminComment[]; nextCursor: string | null };
+
+export async function listAdminComments(query: ContentQuery = {}): Promise<AdminCommentPage> {
+  const body = await apiFetch(
+    `/admin/comments${buildQuery({
+      q: query.q,
+      cursor: query.cursor,
+      limit: query.limit,
+      includeDeleted: query.includeDeleted ? "true" : undefined,
+    })}`,
+  );
+  if (!isRecord(body) || !Array.isArray(body.comments)) throw invalidResponse();
+  return {
+    comments: body.comments.filter(isRecord).map((c) => ({
+      id: str(c.id),
+      postId: str(c.postId),
+      parentId: strOrNull(c.parentId),
+      authorId: str(c.authorId),
+      authorHandle: str(c.authorHandle),
+      authorName: str(c.authorName),
+      excerpt: str(c.excerpt),
+      likeCount: num(c.likeCount),
+      createdAt: str(c.createdAt),
+      deletedAt: strOrNull(c.deletedAt),
+      postVisibility: str(c.postVisibility),
+      postDeleted: c.postDeleted === true,
+    })),
+    nextCursor: nextCursorOf(body),
+  };
+}
+
+export async function deleteAdminComment(id: string): Promise<void> {
+  await apiFetch(`/admin/comments/${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+export async function restoreAdminComment(id: string): Promise<void> {
+  await apiFetch(`/admin/comments/${encodeURIComponent(id)}/restore`, { method: "POST" });
+}
+
 export async function listAdminPapers(query: ContentQuery = {}): Promise<AdminPaperPage> {
   const body = await apiFetch(
     `/admin/papers${buildQuery({
@@ -432,6 +486,11 @@ export type FileQuery = {
   cursor?: string | null;
   limit?: number;
 };
+
+/** 重新触发转码（仅 failed 状态可重试）。 */
+export async function retryAdminFile(id: string): Promise<void> {
+  await apiFetch(`/admin/files/${encodeURIComponent(id)}/retry`, { method: "POST" });
+}
 
 export async function listAdminFiles(query: FileQuery = {}): Promise<AdminFilePage> {
   const body = await apiFetch(

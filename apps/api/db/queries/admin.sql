@@ -217,3 +217,51 @@ ORDER BY file_count DESC;
 -- 只依赖自己的查询集，不必为了一个角色判定去穿透 db.Queries 的私有字段。
 SELECT role = 'admin' FROM users
 WHERE id = sqlc.arg('user_id') AND deleted_at IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- 评论管理
+-- ---------------------------------------------------------------------------
+
+-- name: AdminListComments :many
+-- 评论管理列表：按创建时间倒序，支持正文模糊搜索与「含已删除」。
+-- 与帖子列表保持同一套游标语义（created_at, id）。
+SELECT c.id, c.post_id, c.parent_id, c.author_id,
+       u.handle AS author_handle, u.name AS author_name,
+       left(c.content_text, 200)::text AS excerpt,
+       c.like_count, c.created_at, c.deleted_at,
+       p.visibility AS post_visibility, p.deleted_at AS post_deleted_at
+FROM comments c
+JOIN users u ON u.id = c.author_id
+JOIN posts p ON p.id = c.post_id
+WHERE (sqlc.narg('include_deleted')::boolean IS NOT TRUE AND c.deleted_at IS NULL)
+  AND (sqlc.narg('query')::text IS NULL OR c.content_text ILIKE sqlc.narg('query')::text)
+  AND (sqlc.narg('cursor_at')::timestamptz IS NULL
+       OR (c.created_at, c.id) < (sqlc.narg('cursor_at')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY c.created_at DESC, c.id DESC
+LIMIT sqlc.arg('limit_count')::int;
+
+-- name: AdminSoftDeleteComment :one
+-- 软删除评论并同步减少帖子的 comment_count。
+--
+-- 为什么在这里改计数而不是依赖触发器：项目其它计数（like_count 等）
+-- 都在应用层维护，保持同一套约定，避免出现两套口径。
+-- GREATEST(..., 0) 兜底：历史数据里若有计数漂移，减法不能让计数变负。
+WITH target AS (
+    UPDATE comments SET deleted_at = now()
+    WHERE comments.id = sqlc.arg('id') AND comments.deleted_at IS NULL
+    RETURNING comments.post_id
+)
+UPDATE posts SET comment_count = GREATEST(posts.comment_count - 1, 0), updated_at = now()
+WHERE posts.id = (SELECT post_id FROM target)
+RETURNING posts.id;
+
+-- name: AdminRestoreComment :one
+-- 恢复评论并补回计数。
+WITH target AS (
+    UPDATE comments SET deleted_at = NULL
+    WHERE comments.id = sqlc.arg('id') AND comments.deleted_at IS NOT NULL
+    RETURNING comments.post_id
+)
+UPDATE posts SET comment_count = posts.comment_count + 1, updated_at = now()
+WHERE posts.id = (SELECT post_id FROM target)
+RETURNING posts.id;

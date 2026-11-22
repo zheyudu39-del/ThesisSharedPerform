@@ -68,6 +68,10 @@ type Querier interface {
 
 	AdminListPapers(context.Context, db.AdminListPapersParams) ([]db.AdminListPapersRow, error)
 
+	AdminListComments(context.Context, db.AdminListCommentsParams) ([]db.AdminListCommentsRow, error)
+	AdminSoftDeleteComment(context.Context, pgtype.UUID) (pgtype.UUID, error)
+	AdminRestoreComment(context.Context, pgtype.UUID) (pgtype.UUID, error)
+
 	AdminListGroups(context.Context, db.AdminListGroupsParams) ([]db.AdminListGroupsRow, error)
 	AdminSoftDeleteGroup(context.Context, pgtype.UUID) (db.AdminSoftDeleteGroupRow, error)
 	AdminRestoreGroup(context.Context, pgtype.UUID) (db.AdminRestoreGroupRow, error)
@@ -665,6 +669,118 @@ func (s *Service) ListPapers(ctx context.Context, actorID uuid.UUID, f ContentFi
 	return PaperPage{Papers: papers, NextCursor: next}, nil
 }
 
+// CommentItem 是评论管理列表的一行。
+type CommentItem struct {
+	ID             uuid.UUID  `json:"id"`
+	PostID         uuid.UUID  `json:"postId"`
+	ParentID       *uuid.UUID `json:"parentId"`
+	AuthorID       uuid.UUID  `json:"authorId"`
+	AuthorHandle   string     `json:"authorHandle"`
+	AuthorName     string     `json:"authorName"`
+	Excerpt        string     `json:"excerpt"`
+	LikeCount      int32      `json:"likeCount"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	DeletedAt      *time.Time `json:"deletedAt"`
+	PostVisibility string     `json:"postVisibility"`
+	// PostDeleted 标记所属帖子是否已删除：帖子没了，单条评论的「查看」会 404。
+	PostDeleted bool `json:"postDeleted"`
+}
+
+// CommentPage 是评论管理列表的一页。
+type CommentPage struct {
+	Comments   []CommentItem `json:"comments"`
+	NextCursor *string       `json:"nextCursor"`
+}
+
+// ListComments 返回评论管理列表。
+func (s *Service) ListComments(ctx context.Context, actorID uuid.UUID, f ContentFilter) (CommentPage, error) {
+	if err := s.requireAdmin(ctx, actorID); err != nil {
+		return CommentPage{}, err
+	}
+	limit := normalizeLimit(f.Limit)
+	query, err := searchPattern(f.Query)
+	if err != nil {
+		return CommentPage{}, err
+	}
+	cursorAt, cursorID, err := decodeCursor(f.Cursor, "comments")
+	if err != nil {
+		return CommentPage{}, err
+	}
+
+	rows, err := s.queries.AdminListComments(ctx, db.AdminListCommentsParams{
+		IncludeDeleted: boolParam(f.IncludeDeleted),
+		Query:          query,
+		CursorAt:       cursorAt,
+		CursorID:       cursorID,
+		LimitCount:     limit,
+	})
+	if err != nil {
+		return CommentPage{}, fmt.Errorf("查询评论: %w", err)
+	}
+
+	comments := make([]CommentItem, 0, len(rows))
+	for _, r := range rows {
+		item := CommentItem{
+			ID:             uuid.UUID(r.ID.Bytes),
+			PostID:         uuid.UUID(r.PostID.Bytes),
+			AuthorID:       uuid.UUID(r.AuthorID.Bytes),
+			AuthorHandle:   r.AuthorHandle,
+			AuthorName:     r.AuthorName,
+			Excerpt:        r.Excerpt,
+			LikeCount:      r.LikeCount,
+			CreatedAt:      r.CreatedAt.Time,
+			PostVisibility: string(r.PostVisibility),
+			PostDeleted:    r.PostDeletedAt.Valid,
+		}
+		if r.ParentID.Valid {
+			id := uuid.UUID(r.ParentID.Bytes)
+			item.ParentID = &id
+		}
+		if r.DeletedAt.Valid {
+			t := r.DeletedAt.Time
+			item.DeletedAt = &t
+		}
+		comments = append(comments, item)
+	}
+
+	var next *string
+	if len(rows) == int(limit) {
+		last := rows[len(rows)-1]
+		next = encodeCursor("comments", last.CreatedAt.Time, uuid.UUID(last.ID.Bytes))
+	}
+	return CommentPage{Comments: comments, NextCursor: next}, nil
+}
+
+// DeleteComment 软删除评论，并同步减少所属帖子的 comment_count。
+func (s *Service) DeleteComment(ctx context.Context, actorID, commentID uuid.UUID) error {
+	if err := s.requireAdmin(ctx, actorID); err != nil {
+		return err
+	}
+	_, err := s.queries.AdminSoftDeleteComment(ctx, pgtype.UUID{Bytes: commentID, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("删除评论: %w", err)
+	}
+	return nil
+}
+
+// RestoreComment 恢复被软删除的评论，并补回计数。
+func (s *Service) RestoreComment(ctx context.Context, actorID, commentID uuid.UUID) error {
+	if err := s.requireAdmin(ctx, actorID); err != nil {
+		return err
+	}
+	_, err := s.queries.AdminRestoreComment(ctx, pgtype.UUID{Bytes: commentID, Valid: true})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return fmt.Errorf("恢复评论: %w", err)
+	}
+	return nil
+}
+
 // GroupItem 是群组管理列表的一行。
 type GroupItem struct {
 	ID            uuid.UUID  `json:"id"`
@@ -902,6 +1018,14 @@ func (s *Service) ListFiles(ctx context.Context, actorID uuid.UUID, f FileFilter
 /* -------------------------------------------------------------------------- */
 /* 内部工具                                                                   */
 /* -------------------------------------------------------------------------- */
+
+// CheckAdmin 对外暴露运营身份校验，供其它服务（如文件重试）复用同一套规则。
+//
+// 单独开一个导出方法而不是让调用方自己查库：角色判定只应有一个实现，
+// 否则「谁能进后台」会在多个包里各写一遍，早晚分叉。
+func (s *Service) CheckAdmin(ctx context.Context, userID uuid.UUID) error {
+	return s.requireAdmin(ctx, userID)
+}
 
 // requireAdmin 在服务层再查一次角色，不信任路由或前端。
 func (s *Service) requireAdmin(ctx context.Context, userID uuid.UUID) error {

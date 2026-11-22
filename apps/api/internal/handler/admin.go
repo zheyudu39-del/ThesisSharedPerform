@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/thesis-shared/api/internal/admin"
+	"github.com/thesis-shared/api/internal/file"
 	appmiddleware "github.com/thesis-shared/api/internal/middleware"
 )
 
@@ -16,12 +17,20 @@ import (
 //
 // 路由层只保证「已登录」；角色判定在 admin 服务层完成（requireAdmin），
 // 与 moderation 的做法一致。这样新增接口时即使漏挂中间件，也不会变成越权入口。
-type AdminHandler struct{ service *admin.Service }
+type AdminHandler struct {
+	service *admin.Service
+	// files 用于「重新转码」。为 nil 时该接口返回 503，
+	// 其余后台功能不受影响（对象存储是可选依赖）。
+	files *file.Service
+}
 
 // NewAdminHandler 构造处理器。
 func NewAdminHandler(service *admin.Service) *AdminHandler {
 	return &AdminHandler{service: service}
 }
+
+// SetFileService 注入文件服务，供重新转码使用。
+func (h *AdminHandler) SetFileService(files *file.Service) { h.files = files }
 
 /* -------------------------------------------------------------------------- */
 /* 概览                                                                       */
@@ -200,6 +209,58 @@ func (h *AdminHandler) Papers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// Comments 处理 GET /api/v1/admin/comments。
+func (h *AdminHandler) Comments(w http.ResponseWriter, r *http.Request) {
+	userID, ok := adminUser(w, r)
+	if !ok {
+		return
+	}
+	filter, ok := adminContentFilter(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.ListComments(r.Context(), userID, filter)
+	if err != nil {
+		writeAdminError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// DeleteComment 处理 DELETE /api/v1/admin/comments/{id}（软删除）。
+func (h *AdminHandler) DeleteComment(w http.ResponseWriter, r *http.Request) {
+	userID, ok := adminUser(w, r)
+	if !ok {
+		return
+	}
+	commentID, ok := adminPathUUID(w, r, "id", "评论 ID")
+	if !ok {
+		return
+	}
+	if err := h.service.DeleteComment(r.Context(), userID, commentID); err != nil {
+		writeAdminError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// RestoreComment 处理 POST /api/v1/admin/comments/{id}/restore。
+func (h *AdminHandler) RestoreComment(w http.ResponseWriter, r *http.Request) {
+	userID, ok := adminUser(w, r)
+	if !ok {
+		return
+	}
+	commentID, ok := adminPathUUID(w, r, "id", "评论 ID")
+	if !ok {
+		return
+	}
+	if err := h.service.RestoreComment(r.Context(), userID, commentID); err != nil {
+		writeAdminError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // Groups 处理 GET /api/v1/admin/groups。
 func (h *AdminHandler) Groups(w http.ResponseWriter, r *http.Request) {
 	userID, ok := adminUser(w, r)
@@ -278,6 +339,37 @@ func (h *AdminHandler) Files(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// RetryFile 处理 POST /api/v1/admin/files/{id}/retry，重新触发转码。
+//
+// 转码本身属于 file 服务，后台只负责「确认调用者是运营」再委托过去。
+// 放在 admin 前缀下而不是复用 /files/{id}/complete：后者要求文件归属，
+// 而运营排查时往往要重试别人上传的文件。
+func (h *AdminHandler) RetryFile(w http.ResponseWriter, r *http.Request) {
+	userID, ok := adminUser(w, r)
+	if !ok {
+		return
+	}
+	fileID, ok := adminPathUUID(w, r, "id", "文件 ID")
+	if !ok {
+		return
+	}
+	if h.files == nil {
+		WriteError(w, http.StatusServiceUnavailable, "storage_unavailable", "文件服务暂时不可用")
+		return
+	}
+	// 先确认运营身份，再触达 file 服务：否则任何人都能触发转码。
+	if err := h.service.CheckAdmin(r.Context(), userID); err != nil {
+		writeAdminError(w, err)
+		return
+	}
+	result, err := h.files.RetryTranscode(r.Context(), fileID)
+	if err != nil {
+		writeFileError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"file": result})
 }
 
 /* -------------------------------------------------------------------------- */

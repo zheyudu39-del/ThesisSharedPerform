@@ -15,11 +15,12 @@ import (
 // 否则把「帖子列表」的游标传给「用户列表」，会从错误的时间点开始翻页，
 // 而且看起来一切正常。
 var cursorStreams = map[string]struct{}{
-	"users":  {},
-	"posts":  {},
-	"papers": {},
-	"groups": {},
-	"files":  {},
+	"users":    {},
+	"posts":    {},
+	"papers":   {},
+	"groups":   {},
+	"files":    {},
+	"comments": {},
 }
 
 type cursor struct {

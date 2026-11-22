@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { listAdminPapers, type AdminPaper } from "@/lib/admin";
 import { ApiError } from "@/lib/http";
+import { AdminPaperEditor } from "@/app/admin/papers/AdminPaperEditor";
 import {
   AdminEmpty,
   AdminError,
@@ -31,6 +32,8 @@ const SOURCE_LABEL: Record<string, string> = {
 
 export function AdminPapersPanel() {
   const [query, setQuery] = useState("");
+  // 同时只展开一行编辑器：多行同时展开会让表格变得很长，也容易改错行。
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [papers, setPapers] = useState<AdminPaper[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -96,7 +99,7 @@ export function AdminPapersPanel() {
           <table className="w-full border-collapse text-left">
             <thead>
               <tr className="border-b border-line bg-surface-2">
-                {["论文", "来源", "全文", "讨论", "入库时间"].map((h) => (
+                {["论文", "来源", "全文", "讨论", "入库时间", "操作"].map((h) => (
                   <th
                     key={h}
                     className="px-3 py-2 font-mono text-[0.66rem] font-normal tracking-[0.06em] text-ink-3 uppercase"
@@ -108,7 +111,8 @@ export function AdminPapersPanel() {
             </thead>
             <tbody>
               {papers.map((p) => (
-                <tr key={p.id} className="border-b border-line last:border-0 hover:bg-surface-2/60">
+                <Fragment key={p.id}>
+                <tr className="border-b border-line last:border-0 hover:bg-surface-2/60">
                   <td className="max-w-[420px] px-3 py-2.5">
                     <Link
                       href={`/papers/${p.id}`}
@@ -142,7 +146,37 @@ export function AdminPapersPanel() {
                   <td className="px-3 py-2.5 font-mono text-[0.7rem] text-ink-3">
                     {formatDate(p.createdAt)}
                   </td>
+                  <td className="px-3 py-2.5">
+                    <button
+                      type="button"
+                      onClick={() => setEditingId(editingId === p.id ? null : p.id)}
+                      aria-expanded={editingId === p.id}
+                      className="rounded-[4px] border border-line-strong px-2 py-1 font-mono text-[0.68rem] text-ink-2 hover:border-ink-3 hover:text-ink"
+                    >
+                      {editingId === p.id ? "收起" : "编辑"}
+                    </button>
+                  </td>
                 </tr>
+                {editingId === p.id && (
+                  <tr className="border-b border-line last:border-0">
+                    <td colSpan={6} className="px-3 pb-3">
+                      <AdminPaperEditor
+                        paper={p}
+                        onSaved={(patch) =>
+                          setPapers((prev) =>
+                            prev.map((x) => (x.id === p.id ? { ...x, ...patch } : x)),
+                          )
+                        }
+                        onMerged={(removedId) => {
+                          setPapers((prev) => prev.filter((x) => x.id !== removedId));
+                          setEditingId(null);
+                        }}
+                        onClose={() => setEditingId(null)}
+                      />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>
