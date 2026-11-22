@@ -249,10 +249,20 @@ export async function storeDocument(docId, ydoc) {
       [docId, watermark],
     )
 
+    // 只保留最近 N 个快照（PRD D-04）。不清理的话每个 debounce 周期都会
+    // 新增一份全量状态，中长期会把对象存储吃满。
+    //
+    // 命名里程碑（label 非空）永不删除：用户主动起的名字是他们的锚点，
+    // 被自动清理掉比占用空间更糟。超出上限时优先淘汰无标签的旧快照。
+    const pruned = await pruneSnapshots(client, docId, version)
+
     await client.query('COMMIT')
 
     for (const row of stale) {
       void removeObject(row.storage_key)
+    }
+    for (const key of pruned) {
+      void removeObject(key)
     }
 
     logger.info(
@@ -266,6 +276,67 @@ export async function storeDocument(docId, ydoc) {
   } finally {
     client.release()
   }
+}
+
+/** 单个文档保留的快照上限（PRD D-04「保留最近 50 个自动快照」）。 */
+export const MAX_SNAPSHOTS_PER_DOC = 50
+
+/**
+ * 决定哪些快照该被淘汰（纯函数，便于单测）。
+ *
+ * @param {Array<{version:number,label:string|null}>} snapshots 该文档的全部快照
+ * @param {number} currentVersion 刚写入的版本，永远保留
+ * @param {number} max 上限
+ * @returns {number[]} 应删除的版本号
+ *
+ * 规则：
+ *   - 带 label 的是用户亲手命名的里程碑，永不删除；
+ *   - 无标签的按 version 从旧到新淘汰，直到无标签总数回到上限；
+ *   - 当前版本永远保留。
+ *
+ * 有标签的快照不计入上限——它们是用户显式创建的锚点，
+ * 被自动清理掉比多占几份空间更糟。
+ */
+export function selectPrunableSnapshots(snapshots, currentVersion, max = MAX_SNAPSHOTS_PER_DOC) {
+  if (max <= 0) return []
+  const unlabeled = snapshots
+    .filter((s) => s.label == null && s.version !== currentVersion)
+    .sort((a, b) => a.version - b.version)
+  const keep = Math.max(0, max - 1) // 留一个名额给当前版本
+  if (unlabeled.length <= keep) return []
+  return unlabeled.slice(0, unlabeled.length - keep).map((s) => s.version)
+}
+
+/**
+ * 裁剪超出上限的旧快照，返回被删除对象的 storage_key 列表。
+ *
+ * 规则：
+ *   - 带 label 的是用户亲手命名的里程碑，永不删除；
+ *   - 无标签的按 version 从旧到新淘汰，直到总数回到上限；
+ *   - 当前刚写入的版本永远保留（哪怕它本身超出上限，也只能等下次再裁）。
+ *
+ * 返回的 key 由调用方在 COMMIT 之后删对象——先删对象再回滚事务会留下
+ * 「元数据还在但对象没了」的坏记录。
+ */
+async function pruneSnapshots(client, docId, currentVersion) {
+  // 读全部快照的版本与标签，交给纯函数决定淘汰哪些。
+  //
+  // 为什么不在 SQL 里用 OFFSET 直接删：淘汰规则要区分「有标签/无标签」
+  // 并永远保留当前版本，写成 SQL 后难以验证；而单文档的快照数有上限
+  // （几十条），全量读进内存再决策的代价可以忽略。
+  const { rows } = await client.query(
+    `SELECT version, storage_key, label FROM doc_snapshots WHERE doc_id = $1`,
+    [docId],
+  )
+  const doomed = new Set(selectPrunableSnapshots(rows, currentVersion))
+  if (doomed.size === 0) return []
+
+  const keys = rows.filter((r) => doomed.has(r.version)).map((r) => r.storage_key)
+  await client.query(
+    `DELETE FROM doc_snapshots WHERE doc_id = $1 AND version = ANY($2::int[])`,
+    [docId, [...doomed]],
+  )
+  return keys
 }
 
 /**

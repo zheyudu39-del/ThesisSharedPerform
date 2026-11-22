@@ -24,6 +24,9 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  // 命名快照：展开输入框填写里程碑名称，留空则创建普通快照。
+  const [snapshotFormOpen, setSnapshotFormOpen] = useState(false);
+  const [snapshotLabel, setSnapshotLabel] = useState("");
   // 正在回滚的版本号；非 null 时禁用所有回滚按钮，避免并发触发。
   const [restoring, setRestoring] = useState<number | null>(null);
   // 回滚成功后的提示。需要区分两种情况：
@@ -58,7 +61,11 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
     setCreating(true);
     setError(null);
     try {
-      await createSnapshot(documentId);
+      // label 可空：留空时服务端存 NULL，等同于「普通快照」。
+      // 命名快照（PRD D-04 里程碑）不会被自动清理淘汰。
+      await createSnapshot(documentId, snapshotLabel.trim() || undefined);
+      setSnapshotLabel("");
+      setSnapshotFormOpen(false);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建快照失败");
@@ -130,14 +137,46 @@ export function DocSidebar({ documentId, canEdit }: { documentId: string; canEdi
             {canEdit && (
               <button
                 type="button"
-                onClick={() => void handleSnapshot()}
-                disabled={creating}
-                className="rounded-[3px] px-2 py-0.5 text-[0.72rem] font-semibold text-seal hover:bg-seal-wash disabled:opacity-50"
+                onClick={() => setSnapshotFormOpen((v) => !v)}
+                aria-expanded={snapshotFormOpen}
+                className="rounded-[3px] px-2 py-0.5 text-[0.72rem] font-semibold text-seal hover:bg-seal-wash"
               >
-                {creating ? "创建中…" : "+ 快照"}
+                {snapshotFormOpen ? "取消" : "+ 快照"}
               </button>
             )}
           </div>
+
+          {/* 命名快照（PRD D-04 里程碑）：留空则创建普通快照。
+              命名的快照不会被自动清理淘汰，适合标记「初稿」「投稿版」这类节点。 */}
+          {canEdit && snapshotFormOpen && (
+            <div className="mb-2.5 rounded-[6px] border border-line bg-surface-2 p-2">
+              <label
+                htmlFor="snapshot-label"
+                className="mb-1 block font-mono text-[0.64rem] tracking-[0.08em] text-ink-3 uppercase"
+              >
+                里程碑名称（可选）
+              </label>
+              <div className="flex gap-1.5">
+                <input
+                  id="snapshot-label"
+                  type="text"
+                  value={snapshotLabel}
+                  maxLength={64}
+                  onChange={(e) => setSnapshotLabel(e.target.value)}
+                  placeholder="例如：初稿、投稿版"
+                  className="min-w-0 flex-1 rounded-[4px] border border-line-strong bg-surface px-2 py-1 text-[0.78rem] focus:border-seal focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => void handleSnapshot()}
+                  disabled={creating}
+                  className="shrink-0 rounded-[4px] bg-seal px-2.5 py-1 text-[0.74rem] font-semibold text-paper hover:opacity-90 disabled:opacity-50"
+                >
+                  {creating ? "创建中…" : "创建"}
+                </button>
+              </div>
+            </div>
+          )}
           {loading ? (
             <Skeleton />
           ) : snapshots.length === 0 ? (
