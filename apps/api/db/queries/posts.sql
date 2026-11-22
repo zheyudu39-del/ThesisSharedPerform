@@ -327,3 +327,48 @@ WHERE p.deleted_at IS NULL
   AND (sqlc.narg('cursor_time')::timestamptz IS NULL OR (p.created_at, p.id) < (sqlc.narg('cursor_time')::timestamptz, sqlc.narg('cursor_id')::uuid))
 ORDER BY p.created_at DESC, p.id DESC
 LIMIT sqlc.arg('page_limit');
+
+-- name: ListPaperPosts :many
+-- 论文详情页的「相关讨论」（PRD P-03）。
+-- 只取公开且不属于任何群组的帖子：群内讨论属于群组上下文，
+-- 不该出现在公开的论文页上。
+SELECT p.*, u.name AS author_name, u.handle AS author_handle, u.verify_type AS author_verify_type,
+       EXISTS(SELECT 1 FROM reactions r WHERE r.user_id = sqlc.arg('viewer_id')::uuid AND r.target_type = 'post' AND r.target_id = p.id AND r.kind = 'like') AS liked,
+       EXISTS(SELECT 1 FROM reactions r WHERE r.user_id = sqlc.arg('viewer_id')::uuid AND r.target_type = 'post' AND r.target_id = p.id AND r.kind = 'bookmark') AS bookmarked,
+       COALESCE((SELECT array_agg(t.name ORDER BY t.name) FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE pt.post_id = p.id), '{}') AS tags,
+       op.id AS paper_id_value, op.doi AS paper_doi, op.arxiv_id AS paper_arxiv_id, op.openreview_id AS paper_openreview_id,
+       op.title AS paper_title, op.authors AS paper_authors, op.abstract AS paper_abstract, op.venue AS paper_venue,
+       op.published_at AS paper_published_at, op.citation_count AS paper_citation_count, op.meta_source AS paper_meta_source, op.created_at AS paper_created_at,
+       rp.id AS repost_id, ru.name AS repost_author_name, rp.content_text AS repost_content_text,
+       rpp.id AS repost_paper_id, rpp.doi AS repost_paper_doi, rpp.arxiv_id AS repost_paper_arxiv_id, rpp.openreview_id AS repost_paper_openreview_id,
+       rpp.title AS repost_paper_title, rpp.authors AS repost_paper_authors, rpp.abstract AS repost_paper_abstract, rpp.venue AS repost_paper_venue,
+       rpp.published_at AS repost_paper_published_at, rpp.citation_count AS repost_paper_citation_count, rpp.meta_source AS repost_paper_meta_source, rpp.created_at AS repost_paper_created_at
+FROM posts p
+JOIN users u ON u.id = p.author_id
+LEFT JOIN papers op ON op.id = p.paper_id
+LEFT JOIN posts rp ON rp.id = p.repost_of AND rp.deleted_at IS NULL
+    AND (
+      rp.author_id = sqlc.arg('viewer_id')::uuid
+      OR rp.visibility = 'public'
+      OR (rp.visibility = 'followers'
+          AND EXISTS(SELECT 1 FROM follows rf WHERE rf.follower_id = sqlc.arg('viewer_id')::uuid AND rf.followee_id = rp.author_id))
+    )
+LEFT JOIN users ru ON ru.id = rp.author_id
+LEFT JOIN papers rpp ON rpp.id = rp.paper_id
+WHERE p.deleted_at IS NULL
+  AND p.paper_id = sqlc.arg('paper_id')::uuid
+  AND p.visibility = 'public'
+  AND p.group_id IS NULL
+  AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.blocker_id = sqlc.arg('viewer_id')::uuid AND b.blocked_id = p.author_id)
+  AND (sqlc.narg('cursor_time')::timestamptz IS NULL OR (p.created_at, p.id) < (sqlc.narg('cursor_time')::timestamptz, sqlc.narg('cursor_id')::uuid))
+ORDER BY p.created_at DESC, p.id DESC
+LIMIT sqlc.arg('page_limit');
+
+-- name: CountPaperPosts :one
+-- 「相关讨论」的总数。与列表用同一套可见性谓词，避免「共 12 条」但只翻得到 8 条。
+SELECT count(*) FROM posts p
+WHERE p.deleted_at IS NULL
+  AND p.paper_id = sqlc.arg('paper_id')::uuid
+  AND p.visibility = 'public'
+  AND p.group_id IS NULL
+  AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.blocker_id = sqlc.arg('viewer_id')::uuid AND b.blocked_id = p.author_id);

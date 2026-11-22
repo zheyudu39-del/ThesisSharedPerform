@@ -787,6 +787,77 @@ func (s *Service) AuthorPosts(ctx context.Context, viewerID uuid.UUID, handle, k
 	return FeedResult{Posts: posts, NextCursor: next}, nil
 }
 
+// PaperPosts 返回某篇论文下的公开讨论（PRD P-03）。
+//
+// 只收公开且不属于群组的帖子：群内讨论是群组上下文的一部分，
+// 挂到公开论文页上等于把私域内容暴露给所有人。
+//
+// viewerID 为 uuid.Nil 表示匿名：liked / bookmarked 恒为 false，
+// 同时被屏蔽作者的帖子不做过滤（匿名者没有屏蔽列表）。
+func (s *Service) PaperPosts(ctx context.Context, viewerID, paperID uuid.UUID, rawCursor string, limit int32) (FeedResult, error) {
+	if paperID == uuid.Nil {
+		return FeedResult{}, fmt.Errorf("%w: 论文 ID 不能为空", ErrValidation)
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	createdAt, id, _, err := DecodeCursor(rawCursor, "paper")
+	if err != nil {
+		return FeedResult{}, err
+	}
+
+	q := db.New(s.pool)
+	rows, err := q.ListPaperPosts(ctx, db.ListPaperPostsParams{
+		ViewerID:   uuidParam(viewerID),
+		PaperID:    uuidParam(paperID),
+		CursorTime: pgtype.Timestamptz{Time: createdAt, Valid: rawCursor != ""},
+		CursorID:   uuidParam(id),
+		PageLimit:  limit + 1,
+	})
+	if err != nil {
+		return FeedResult{}, err
+	}
+
+	hasMore := len(rows) > int(limit)
+	if hasMore {
+		rows = rows[:limit]
+	}
+	posts := make([]Post, 0, len(rows))
+	for _, row := range rows {
+		post, err := toPost(db.GetPostByIDRow(row))
+		if err != nil {
+			return FeedResult{}, err
+		}
+		posts = append(posts, post)
+	}
+	if err := s.attachFiles(ctx, s.attachments, posts); err != nil {
+		slog.Error("加载论文讨论附件失败", "paper", paperID, "err", err)
+	}
+
+	var next *string
+	if hasMore && len(rows) > 0 {
+		last := rows[len(rows)-1]
+		encoded, err := EncodeCursor("paper", last.CreatedAt.Time, last.ID.Bytes, nil)
+		if err != nil {
+			return FeedResult{}, err
+		}
+		next = &encoded
+	}
+	return FeedResult{Posts: posts, NextCursor: next}, nil
+}
+
+// CountPaperPosts 返回论文讨论总数，供页面上显示「共 N 条讨论」。
+func (s *Service) CountPaperPosts(ctx context.Context, viewerID, paperID uuid.UUID) (int64, error) {
+	q := db.New(s.pool)
+	return q.CountPaperPosts(ctx, db.CountPaperPostsParams{
+		ViewerID: uuidParam(viewerID),
+		PaperID:  uuidParam(paperID),
+	})
+}
+
 // SetLike 原子维护 reaction 和冗余计数，重复操作幂等。
 func (s *Service) SetLike(ctx context.Context, userID, postID uuid.UUID, liked bool) (int32, error) {
 	tx, err := s.pool.Begin(ctx)

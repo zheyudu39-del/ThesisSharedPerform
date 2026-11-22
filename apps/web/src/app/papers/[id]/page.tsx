@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { PaperDiscussions } from "@/components/PaperDiscussions";
 import { PaperFileSection } from "@/components/PaperFileSection";
 import { SiteHeader } from "@/components/SiteHeader";
 import { fetchPaper } from "@/lib/server-api";
@@ -146,6 +147,8 @@ export default async function PaperDetailPage({ params }: PageProps) {
           </dl>
 
           <PaperFileSection paperId={paper.id} pdfFileId={paper.pdfFileId} />
+
+          <PaperDiscussions paperId={paper.id} />
 
           {paper.abstract ? (
             <section>

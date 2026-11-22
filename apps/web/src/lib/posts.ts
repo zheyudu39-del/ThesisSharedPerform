@@ -357,6 +357,34 @@ export async function getAuthorPosts(
 }
 
 /**
+ * 拉取某篇论文下的公开讨论（PRD P-03）。
+ *
+ * 只包含公开且不属于任何群组的帖子——群内讨论不对外展示。
+ */
+export async function getPaperPosts(
+  paperId: string,
+  cursor: string | null = null,
+  limit = 20,
+): Promise<FeedPage & { total: number | null }> {
+  const params = new URLSearchParams({ limit: String(Math.min(Math.max(limit, 1), 50)) });
+  if (cursor) params.set("cursor", cursor);
+
+  const body = await apiFetch(
+    `/papers/${encodeURIComponent(paperId)}/posts?${params.toString()}`,
+    { method: "GET" },
+  );
+  const page = normalizePostList(body);
+  return {
+    ...page,
+    // 总数只在首页返回；翻页时为 null，页面沿用已显示的数字。
+    total:
+      isRecord(body) && typeof body.total === "number" && Number.isFinite(body.total)
+        ? body.total
+        : null,
+  };
+}
+
+/**
  * 单个帖子详情。
  *
  * 令牌可选：未登录也能尝试读取公开帖；服务端对「不存在」与「无权查看」

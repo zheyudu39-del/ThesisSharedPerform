@@ -51,7 +51,7 @@ func TestEncodeCursorProfileStreams(t *testing.T) {
 	id := uuid.Must(uuid.NewV7())
 	now := time.Now().UTC()
 
-	for _, stream := range []string{"posts", "reposts"} {
+	for _, stream := range []string{"posts", "reposts", "paper"} {
 		encoded, err := EncodeCursor(stream, now, id, nil)
 		if err != nil {
 			t.Fatalf("EncodeCursor(%q): %v", stream, err)

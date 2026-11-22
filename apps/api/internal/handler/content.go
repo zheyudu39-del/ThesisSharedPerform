@@ -120,6 +120,43 @@ func (h *ContentHandler) UserPosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// PaperPosts 处理 GET /api/v1/papers/{id}/posts?cursor=&limit=。
+//
+// 论文详情页的「相关讨论」（PRD P-03）。公开可读：论文是公开内容，
+// 讨论列表也应匿名可见；带会话时填充 liked / bookmarked。
+func (h *ContentHandler) PaperPosts(w http.ResponseWriter, r *http.Request) {
+	viewerID, _ := appmiddleware.UserID(r.Context())
+
+	paperID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		WriteError(w, http.StatusUnprocessableEntity, "validation_error", "论文 ID 格式不正确")
+		return
+	}
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.PaperPosts(
+		r.Context(), viewerID, paperID, r.URL.Query().Get("cursor"), limit,
+	)
+	if err != nil {
+		writeContentError(w, err)
+		return
+	}
+
+	// 首页（无游标）时顺带返回总数，前端页头直接显示「共 N 条讨论」。
+	// 翻页不重复统计：省一次全表扫描，且数字在会话内保持一致。
+	if r.URL.Query().Get("cursor") == "" {
+		if total, err := h.service.CountPaperPosts(r.Context(), viewerID, paperID); err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"posts": result.Posts, "nextCursor": result.NextCursor, "total": total,
+			})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (h *ContentHandler) Like(w http.ResponseWriter, r *http.Request)   { h.setLike(w, r, true) }
 func (h *ContentHandler) Unlike(w http.ResponseWriter, r *http.Request) { h.setLike(w, r, false) }
 func (h *ContentHandler) setLike(w http.ResponseWriter, r *http.Request, liked bool) {

@@ -33,6 +33,7 @@ var cursorStreams = map[string]struct{}{
 	"comments":  {},
 	"posts":     {},
 	"reposts":   {},
+	"paper":     {},
 }
 
 // EncodeCursor 将信息流游标编码为 URL 安全的 base64 字符串。

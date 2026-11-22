@@ -330,6 +330,9 @@ func New(d Deps) *http.Server {
 		// 与主页同样公开可读：匿名访问时 liked / bookmarked 恒为 false。
 		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/users/{handle}/posts", contents.UserPosts)
 
+		// 论文详情页的「相关讨论」（P-03）。公开可读，与论文本身一致。
+		r.With(appmiddleware.OptionalAuthenticate(tokens)).Get("/papers/{id}/posts", contents.PaperPosts)
+
 		// 文件读取：论文全文预览必须对访客可见（PRD V-01 / P-05）。
 		// 挂在 OptionalAuthenticate 下而不是 Authenticate：论文是公开内容，
 		// 要求登录才能看预览等于把论文页做成了登录墙。可读性由服务层判定
