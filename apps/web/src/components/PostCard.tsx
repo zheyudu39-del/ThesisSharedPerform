@@ -8,6 +8,7 @@ import { PaperPreviewCard } from "./PaperPreviewCard";
 import { AttachmentBlock } from "./AttachmentBlock";
 import { ReportDialog } from "./ReportDialog";
 import { SealBadge } from "./SealBadge";
+import { usePresence } from "./motion";
 import { AuthError } from "@/lib/auth";
 import {
   bookmarkPost,
@@ -48,11 +49,23 @@ export type PostCardProps = {
    * 「存入群文件库」入口——公开时间线里的帖子无处可存。
    */
   groupSlug?: string;
+  /**
+   * 在列表中的序号，仅用于入场动画的错峰延迟。
+   * 默认 0：详情页、单条展示等场景不需要错峰。
+   */
+  entryIndex?: number;
 };
 
 type PendingAction = "like" | "bookmark" | null;
 
-export function PostCard({ post, onPatch, onDeleted, detail = false, groupSlug }: PostCardProps) {
+export function PostCard({
+  post,
+  onPatch,
+  onDeleted,
+  detail = false,
+  groupSlug,
+  entryIndex = 0,
+}: PostCardProps) {
   const { status, user } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
@@ -67,6 +80,8 @@ export function PostCard({ post, onPatch, onDeleted, detail = false, groupSlug }
   // menuOpen：右上角「⋯」菜单；editing：就地展开的编辑框；
   // confirmingDelete：页面内的删除确认块（不使用 window.confirm）。
   const [menuOpen, setMenuOpen] = useState(false);
+  // 菜单关闭时先播退场再卸载。
+  const menu = usePresence(menuOpen, 100);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(post.contentText);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -316,7 +331,12 @@ export function PostCard({ post, onPatch, onDeleted, detail = false, groupSlug }
   if (deleted) return null;
 
   return (
-    <article className="rounded-[12px] border border-line bg-surface p-4.5 shadow-[var(--shadow-1)]">
+    <article
+      // 入场淡入 + 轻微上浮。索引延迟让连续卡片依次落定，
+      // 上限 8 张：再多用户就只会觉得「加载很慢」而不是「有节奏」。
+      className="anim-rise rounded-[12px] border border-line bg-surface p-4.5 shadow-[var(--shadow-1)]"
+      style={{ animationDelay: `${Math.min(entryIndex, 8) * 30}ms` }}
+    >
       {/* 作者行 */}
       <div className="mb-3 flex items-center gap-2.5">
         <Link
@@ -368,10 +388,12 @@ export function PostCard({ post, onPatch, onDeleted, detail = false, groupSlug }
             >
               <MoreIcon />
             </button>
-            {menuOpen && (
+            {menu.mounted && (
               <div
                 role="menu"
-                className="absolute top-[calc(100%+4px)] right-0 z-30 w-36 overflow-hidden rounded-[10px] border border-line bg-surface shadow-[var(--shadow-2)]"
+                className={`absolute top-[calc(100%+4px)] right-0 z-30 w-36 overflow-hidden rounded-[10px] border border-line bg-surface shadow-[var(--shadow-2)] ${
+                  menu.closing ? "anim-leave-drop" : "anim-drop"
+                }`}
               >
                 <div className="flex flex-col p-1">
                   <button
@@ -560,7 +582,11 @@ export function PostCard({ post, onPatch, onDeleted, detail = false, groupSlug }
             liked ? "font-semibold text-seal" : "text-ink-2"
           } ${pending === "like" ? "opacity-70" : ""}`}
         >
-          <HeartIcon filled={liked} />
+          {/* key 随点赞状态变化，让「按下」动画每次点击都重播一次：
+              同一个 key 时 React 复用元素，animation 不会重新触发。 */}
+          <span key={liked ? "on" : "off"} className={liked ? "anim-press" : undefined}>
+            <HeartIcon filled={liked} />
+          </span>
           <span className="font-semibold">赞</span>
           <span className="font-mono text-[0.78rem] tabular-nums">{likeCount}</span>
         </button>

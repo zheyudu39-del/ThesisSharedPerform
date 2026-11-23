@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { NotificationBell } from "@/components/NotificationBell";
+import { usePresence } from "@/components/motion";
 
 /**
  * 站点顶栏：品牌字标 + 主导航 + 登录态。
@@ -138,6 +139,8 @@ function UserMenu({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  // 菜单关闭时先播 100ms 退场再卸载，避免硬切。
+  const menu = usePresence(open, 100);
 
   // 点击外部或按 Esc 关闭菜单。
   useEffect(() => {
@@ -189,10 +192,12 @@ function UserMenu({
         </svg>
       </button>
 
-      {open && (
+      {menu.mounted && (
         <div
           role="menu"
-          className="absolute top-[calc(100%+6px)] right-0 z-30 w-56 overflow-hidden rounded-[12px] border border-line bg-surface shadow-[var(--shadow-2)]"
+          className={`absolute top-[calc(100%+6px)] right-0 z-30 w-56 overflow-hidden rounded-[12px] border border-line bg-surface shadow-[var(--shadow-2)] ${
+            menu.closing ? "anim-leave-drop" : "anim-drop"
+          }`}
         >
           <div className="border-b border-line px-4 py-3">
             <p className="truncate text-sm font-semibold text-ink">{name}</p>

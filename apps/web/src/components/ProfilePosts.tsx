@@ -153,8 +153,8 @@ export function ProfilePosts({ handle }: { handle: string }) {
 
       {state.posts.length > 0 && (
         <div className="flex flex-col gap-4">
-          {state.posts.map((post) => (
-            <PostCard key={post.id} post={post} />
+          {state.posts.map((post, i) => (
+            <PostCard key={post.id} post={post} entryIndex={i} />
           ))}
           <div className="flex flex-col items-center gap-2 py-2">
             {state.cursor ? (

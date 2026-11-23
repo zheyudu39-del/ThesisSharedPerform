@@ -198,11 +198,15 @@ export function AdminUsersPanel() {
               </tr>
             </thead>
             <tbody>
-              {users.map((u) => {
+              {users.map((u, i) => {
                 const isSelf = me?.id === u.id;
                 const busy = actingId === u.id;
                 return (
-                  <tr key={u.id} className="border-b border-line last:border-0 hover:bg-surface-2/60">
+                  <tr
+                    key={u.id}
+                    className="anim-rise border-b border-line last:border-0 hover:bg-surface-2/60"
+                    style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }}
+                  >
                     <td className="px-3 py-2.5">
                       <Link
                         href={`/u/${encodeURIComponent(u.handle)}`}

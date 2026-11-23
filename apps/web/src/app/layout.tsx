@@ -52,7 +52,14 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" className={`${fraunces.variable} ${inter.variable} ${plexMono.variable}`}>
       <body>
-        <AuthProvider>{children}</AuthProvider>
+        {/*
+          页面内容区淡入：120ms，只做透明度，不做位移。
+          整页上浮会让人误以为在滚动，而且会与信息流的卡片入场叠加。
+          SSR 首屏同样会播——从纸色到内容，不是从白闪到内容，可以接受。
+        */}
+        <AuthProvider>
+          <div className="anim-page">{children}</div>
+        </AuthProvider>
       </body>
     </html>
   );

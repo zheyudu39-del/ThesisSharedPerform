@@ -81,8 +81,8 @@ export function PaperDiscussions({ paperId }: { paperId: string }) {
 
       {posts.length > 0 && (
         <div className="flex flex-col gap-4">
-          {posts.map((post) => (
-            <PostCard key={post.id} post={post} />
+          {posts.map((post, i) => (
+            <PostCard key={post.id} post={post} entryIndex={i} />
           ))}
           <div className="flex flex-col items-center gap-2 py-2">
             {cursor ? (

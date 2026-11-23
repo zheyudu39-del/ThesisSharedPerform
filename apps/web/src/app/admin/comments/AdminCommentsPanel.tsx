@@ -151,13 +151,14 @@ export function AdminCommentsPanel() {
         <AdminEmpty>没有匹配的评论。</AdminEmpty>
       ) : (
         <ul className="flex flex-col gap-2">
-          {comments.map((c) => {
+          {comments.map((c, i) => {
             const deleted = c.deletedAt !== null;
             const busy = actingId === c.id;
             return (
               <li
                 key={c.id}
-                className={`rounded-[10px] border border-line bg-surface px-3.5 py-3 ${
+                style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }}
+                className={`anim-rise rounded-[10px] border border-line bg-surface px-3.5 py-3 ${
                   deleted ? "opacity-60" : ""
                 }`}
               >

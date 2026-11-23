@@ -106,12 +106,21 @@ function Shell({ children }: { children: React.ReactNode }) {
                   <Link
                     href={item.href}
                     aria-current={active ? "page" : undefined}
-                    className={`flex flex-col rounded-[6px] px-3 py-2 transition-colors ${
+                    className={`relative flex flex-col rounded-[6px] px-3 py-2 transition-colors duration-150 ${
                       active
                         ? "bg-ink text-paper"
                         : "text-ink-2 hover:bg-surface hover:text-ink"
                     }`}
                   >
+                    {/* 激活指示：左侧 2px 印章色竖条，用 scaleY 从中间展开。
+                        比整块变色更能说明「当前在哪」，也不抢文字的注意力。 */}
+                    <span
+                      aria-hidden
+                      className={`absolute top-1.5 bottom-1.5 left-0 w-[2px] rounded-full bg-seal transition-transform duration-150 ${
+                        active ? "scale-y-100" : "scale-y-0"
+                      }`}
+                      style={{ transformOrigin: "center" }}
+                    />
                     <span className="text-[0.85rem] font-medium">{item.label}</span>
                     <span
                       className={`font-mono text-[0.66rem] ${
@@ -127,7 +136,10 @@ function Shell({ children }: { children: React.ReactNode }) {
           </ul>
         </nav>
 
-        <div className="min-w-0 flex-1">{children}</div>
+        {/* 后台内容区：切页时 120ms 淡入，与前台保持同一节奏。 */}
+        <div key={pathname} className="anim-page min-w-0 flex-1">
+          {children}
+        </div>
       </div>
     </div>
   );

@@ -140,9 +140,9 @@ export function GroupFeed({
       )}
 
       <ul className="flex flex-col gap-3">
-        {posts.map((post) => (
+        {posts.map((post, i) => (
           <li key={post.id}>
-            <PostCard post={post} onPatch={patchPost} groupSlug={slug} />
+            <PostCard post={post} onPatch={patchPost} groupSlug={slug} entryIndex={i} />
           </li>
         ))}
       </ul>

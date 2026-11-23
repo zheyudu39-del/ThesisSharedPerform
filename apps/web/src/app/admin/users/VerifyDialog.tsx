@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { setAdminUserVerify, type AdminUser, type VerifyType } from "@/lib/admin";
 import { ApiError } from "@/lib/http";
+import { useFocusTrap } from "@/components/motion";
 
 /**
  * 认证授予弹窗（A-05）。
@@ -36,6 +37,11 @@ export function VerifyDialog({
   const [verifyOrg, setVerifyOrg] = useState(user.verifyOrg || "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // 自绘遮罩的弹窗没有原生 <dialog> 的焦点陷阱，这里补上：
+  // 打开时聚焦第一个控件，Tab 在弹窗内循环，关闭后焦点归还触发按钮。
+  useFocusTrap(true, panelRef);
 
   // Esc 关闭：弹窗是模态的，不给键盘用户留出口会很别扭。
   useEffect(() => {
@@ -67,7 +73,7 @@ export function VerifyDialog({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4"
+      className="anim-fade fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="verify-title"
@@ -76,7 +82,10 @@ export function VerifyDialog({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-md rounded-[12px] border border-line bg-surface p-5 shadow-[var(--shadow-2,0_12px_32px_rgba(0,0,0,0.18))]">
+      <div
+        ref={panelRef}
+        className="anim-pop w-full max-w-md rounded-[12px] border border-line bg-surface p-5 shadow-[var(--shadow-2,0_12px_32px_rgba(0,0,0,0.18))]"
+      >
         <h2 id="verify-title" className="font-display text-[1.1rem] font-semibold">
           认证标识
         </h2>

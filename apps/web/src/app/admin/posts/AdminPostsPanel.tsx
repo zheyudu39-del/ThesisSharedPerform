@@ -150,13 +150,14 @@ export function AdminPostsPanel() {
         <AdminEmpty>没有匹配的帖子。</AdminEmpty>
       ) : (
         <ul className="flex flex-col gap-2">
-          {posts.map((p) => {
+          {posts.map((p, i) => {
             const deleted = p.deletedAt !== null;
             const busy = actingId === p.id;
             return (
               <li
                 key={p.id}
-                className={`rounded-[10px] border border-line bg-surface px-3.5 py-3 ${
+                style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }}
+                className={`anim-rise rounded-[10px] border border-line bg-surface px-3.5 py-3 ${
                   deleted ? "opacity-60" : ""
                 }`}
               >

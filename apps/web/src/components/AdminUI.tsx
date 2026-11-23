@@ -56,7 +56,7 @@ export function StatCard({
   const valueTone =
     tone === "warn" ? "text-danger" : tone === "good" ? "text-good" : "text-ink";
   return (
-    <div className="rounded-[10px] border border-line bg-surface px-3.5 py-3">
+    <div className="anim-rise rounded-[10px] border border-line bg-surface px-3.5 py-3">
       <p className="font-mono text-[0.66rem] tracking-[0.08em] text-ink-3 uppercase">
         {label}
       </p>
@@ -141,9 +141,14 @@ export function AdminEmpty({ children }: { children: ReactNode }) {
 
 export function AdminSkeleton({ rows = 3 }: { rows?: number }) {
   return (
-    <div className="flex flex-col gap-2" aria-hidden>
+    <div className="anim-fade flex flex-col gap-2" aria-hidden>
       {Array.from({ length: rows }, (_, i) => (
-        <div key={i} className="h-16 animate-pulse rounded-[10px] border border-line bg-surface" />
+        <div
+          key={i}
+          className="h-16 animate-pulse rounded-[10px] border border-line bg-surface"
+          // 骨架本身也是「进入」：错峰出现比整块闪现更柔和。
+          style={{ animationDelay: `${i * 40}ms` }}
+        />
       ))}
     </div>
   );
@@ -253,6 +258,14 @@ export function TrendChart({
                 strokeWidth="1.8"
                 strokeLinejoin="round"
                 strokeLinecap="round"
+                // 「墨迹晕开」：用 dasharray 把线藏起来，再让 dashoffset
+                // 从满长度回到 0，视觉上就是从起点画到终点。
+                // pathLength=1 让虚线长度与真实像素无关，换数据也不用重算。
+                pathLength={1}
+                strokeDasharray={1}
+                style={{
+                  animation: `ink-draw 700ms var(--ease-ink) ${s.key === "users" ? 0 : 120}ms both`,
+                }}
               />
             );
           })}

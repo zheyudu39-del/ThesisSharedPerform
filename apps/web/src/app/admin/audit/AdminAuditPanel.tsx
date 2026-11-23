@@ -125,8 +125,12 @@ export function AdminAuditPanel() {
         <AdminEmpty>还没有审计记录。运营进行封禁、认证、删除等操作后会出现在这里。</AdminEmpty>
       ) : (
         <ul className="flex flex-col gap-2">
-          {logs.map((log) => (
-            <li key={log.id} className="rounded-[10px] border border-line bg-surface px-3.5 py-2.5">
+          {logs.map((log, i) => (
+            <li
+              key={log.id}
+              className="anim-rise rounded-[10px] border border-line bg-surface px-3.5 py-2.5"
+              style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }}
+            >
               <div className="flex flex-wrap items-center gap-2">
                 <Badge
                   label={ACTION_LABEL[log.action] ?? log.action}

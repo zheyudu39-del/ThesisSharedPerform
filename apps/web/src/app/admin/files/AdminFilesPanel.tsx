@@ -176,8 +176,12 @@ export function AdminFilesPanel() {
         </AdminEmpty>
       ) : (
         <ul className="flex flex-col gap-2">
-          {files.map((f) => (
-            <li key={f.id} className="rounded-[10px] border border-line bg-surface px-3.5 py-3">
+          {files.map((f, i) => (
+            <li
+              key={f.id}
+              className="anim-rise rounded-[10px] border border-line bg-surface px-3.5 py-3"
+              style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }}
+            >
               <div className="mb-1 flex flex-wrap items-center gap-2">
                 <span className="truncate text-[0.85rem] font-medium text-ink">
                   {f.originalName}

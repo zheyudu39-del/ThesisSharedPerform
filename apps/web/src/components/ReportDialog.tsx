@@ -95,7 +95,9 @@ export function ReportDialog({
       onClick={(event) => {
         if (event.target === dialogRef.current) onClose();
       }}
-      className="w-[min(92vw,28rem)] rounded-[12px] border border-line bg-surface p-0 text-ink shadow-[var(--shadow-1)] backdrop:bg-black/40"
+      // 原生 dialog 的 showModal() 自带焦点陷阱与 Esc 关闭，动画只加在视觉上。
+      // backdrop 用单独的 keyframes：::backdrop 不继承 dialog 的 transform。
+      className="anim-pop w-[min(92vw,28rem)] rounded-[12px] border border-line bg-surface p-0 text-ink shadow-[var(--shadow-1)] backdrop:animate-[ink-fade_200ms_var(--ease-ink)_both] backdrop:bg-black/40"
     >
       <form onSubmit={handleSubmit} className="flex flex-col gap-4 p-5">
         <div>

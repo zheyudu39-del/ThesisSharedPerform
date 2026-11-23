@@ -120,6 +120,138 @@ body {
   outline-offset: 2px;
 }
 
+/* ==========================================================================
+   动效（Ink & Seal）
+   --------------------------------------------------------------------------
+   设计约束，改之前先读：
+     1. 只动「进入」与「状态变化」，不做循环装饰动画（loading 除外）；
+     2. 时长 120–220ms，缓动统一 --ease-ink（快出慢收，像墨落在纸上）；
+     3. 位移不超过 8px，不旋转、不弹跳。
+   纸墨语言是静止克制的，动画只用来交代「从哪来」，不负责炫技。
+   ========================================================================== */
+
+@theme {
+  /* 墨落纸：起步快、收尾慢，比 ease-out 更有「落定」感。 */
+  --ease-ink: cubic-bezier(0.22, 1, 0.36, 1);
+  /* 退场更快：用户已经决定离开，不需要再挽留。 */
+  --ease-ink-out: cubic-bezier(0.4, 0, 1, 1);
+}
+
+/* 内容进入：淡入 + 轻微上浮。帖子卡片、页面内容区共用。 */
+@keyframes ink-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 下拉菜单 / 通知面板：从锚点方向展开。 */
+@keyframes ink-drop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 弹窗内容：比下拉幅度稍大，因为视觉焦点更集中。 */
+@keyframes ink-pop {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 遮罩淡入。 */
+@keyframes ink-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 折线图绘制：配合 SVG 的 pathLength=1 + strokeDasharray=1 使用。
+   dashoffset 从 1 回到 0，视觉上就是线条从起点画到终点。 */
+@keyframes ink-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* 点赞等微交互：按一下「印」下去再回弹。 */
+@keyframes ink-press {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.15);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* --------------------------------------------------------------------------
+   工具类：把上面的 keyframes 包成可直接挂在 className 上的原子类。
+   用 animation 而非 transition，是因为这些元素是「刚挂载」，
+   没有前一个状态可过渡——CSS 动画能在挂载瞬间从 from 帧开始播。
+   -------------------------------------------------------------------------- */
+
+.anim-rise {
+  animation: ink-rise 200ms var(--ease-ink) both;
+}
+
+.anim-drop {
+  animation: ink-drop 180ms var(--ease-ink) both;
+  transform-origin: top right;
+}
+
+.anim-pop {
+  animation: ink-pop 200ms var(--ease-ink) both;
+}
+
+.anim-fade {
+  animation: ink-fade 200ms var(--ease-ink) both;
+}
+
+.anim-press {
+  animation: ink-press 160ms var(--ease-ink);
+}
+
+/* 页面内容区：只做极短的淡入，不做位移——整页上浮会让人误以为在滚动。 */
+.anim-page {
+  animation: ink-fade 120ms var(--ease-ink) both;
+}
+
+/* 退场：由组件在动画结束后卸载元素。 */
+.anim-leave-drop {
+  animation: ink-drop 100ms var(--ease-ink-out) reverse both;
+}
+
+.anim-leave-pop {
+  animation: ink-pop 100ms var(--ease-ink-out) reverse both;
+}
+
+.anim-leave-fade {
+  animation: ink-fade 100ms var(--ease-ink-out) reverse both;
+}
+
 /* 尊重减弱动效偏好 */
 @media (prefers-reduced-motion: reduce) {
   *,

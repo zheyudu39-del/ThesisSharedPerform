@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
+import { usePresence } from "@/components/motion";
 import { formatRelativeTime } from "@/lib/posts";
 import {
   getUnreadCount,
@@ -31,6 +32,8 @@ const RECENT_LIMIT = 10;
 export function NotificationBell() {
   const { status } = useAuth();
   const [open, setOpen] = useState(false);
+  // 关闭时先播退场再卸载。
+  const panel = usePresence(open, 100);
   const [unread, setUnread] = useState(0);
   const [items, setItems] = useState<NotificationDTO[]>([]);
   const [loading, setLoading] = useState(false);
@@ -153,11 +156,13 @@ export function NotificationBell() {
         )}
       </button>
 
-      {open && (
+      {panel.mounted && (
         <div
           role="dialog"
           aria-label="通知"
-          className="absolute top-[calc(100%+6px)] right-0 z-30 w-[min(22rem,calc(100vw-2.5rem))] overflow-hidden rounded-[12px] border border-line bg-surface shadow-[var(--shadow-2)]"
+          className={`absolute top-[calc(100%+6px)] right-0 z-30 w-[min(22rem,calc(100vw-2.5rem))] overflow-hidden rounded-[12px] border border-line bg-surface shadow-[var(--shadow-2)] ${
+            panel.closing ? "anim-leave-drop" : "anim-drop"
+          }`}
         >
           <div className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
             <p className="font-mono text-[0.72rem] tracking-[0.14em] text-ink-3 uppercase">

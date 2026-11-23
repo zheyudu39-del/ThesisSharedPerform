@@ -153,13 +153,14 @@ export function AdminGroupsPanel() {
         <AdminEmpty>没有匹配的群组。</AdminEmpty>
       ) : (
         <ul className="flex flex-col gap-2">
-          {groups.map((g) => {
+          {groups.map((g, i) => {
             const deleted = g.deletedAt !== null;
             const busy = actingId === g.id;
             return (
               <li
                 key={g.id}
-                className={`rounded-[10px] border border-line bg-surface px-3.5 py-3 ${
+                style={{ animationDelay: `${Math.min(i, 8) * 30}ms` }}
+                className={`anim-rise rounded-[10px] border border-line bg-surface px-3.5 py-3 ${
                   deleted ? "opacity-60" : ""
                 }`}
               >

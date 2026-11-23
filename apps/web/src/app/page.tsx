@@ -257,8 +257,8 @@ export default function HomePage() {
 
             {showFeed && posts.length > 0 && (
               <div className="flex flex-col gap-4">
-                {posts.map((post) => (
-                  <PostCard key={post.id} post={post} onPatch={patchPost} />
+                {posts.map((post, i) => (
+                  <PostCard key={post.id} post={post} onPatch={patchPost} entryIndex={i} />
                 ))}
 
                 {/* 分页尾部 */}

@@ -75,8 +75,8 @@ export function TagFeed({ slug }: { slug: string }) {
 
   return (
     <div className="flex flex-col gap-4">
-      {posts.map((post) => (
-        <PostCard key={post.id} post={post} />
+      {posts.map((post, i) => (
+        <PostCard key={post.id} post={post} entryIndex={i} />
       ))}
       <div className="flex flex-col items-center gap-2 py-2">
         {error && (
