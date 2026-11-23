@@ -66,6 +66,7 @@ type Querier interface {
 
 	AdminGetUserVerify(context.Context, pgtype.UUID) (db.AdminGetUserVerifyRow, error)
 	AdminSetUserVerify(context.Context, db.AdminSetUserVerifyParams) (db.AdminSetUserVerifyRow, error)
+	AdminGetUserHandle(context.Context, pgtype.UUID) (string, error)
 
 	AdminCreateAuditLog(context.Context, db.AdminCreateAuditLogParams) (db.AdminCreateAuditLogRow, error)
 	AdminListAuditLogs(context.Context, db.AdminListAuditLogsParams) ([]db.AdminAuditLog, error)
@@ -603,13 +604,13 @@ func (s *Service) audit(ctx context.Context, actorID uuid.UUID, e auditEntry) {
 	}
 }
 
-// actorHandle 取操作人的句柄。Querier 没有单独的用户查询方法，
-// 复用 AdminListUsers 的搜索能力不划算，这里直接走审计表的兜底逻辑——
-// 句柄只用于展示，拿不到就用 ID。
+// actorHandle 取操作人的句柄，写进审计日志。
+//
+// 查不到时由调用方用 UUID 兜底：日志的价值在于「有记录」，
+// 句柄缺失不影响追责，但能查到就一定写可读的句柄——
+// 只显示 UUID 前缀的日志，运营根本认不出是谁做的。
 func (s *Service) actorHandle(ctx context.Context, actorID uuid.UUID) (string, error) {
-	// 通过「最后一名管理员」的查询拿不到句柄，改为在写日志时由 SQL 侧留空，
-	// 后续版本可加专用查询。当前实现用 ID 前缀作为可读兜底。
-	return actorID.String()[:8], nil
+	return s.queries.AdminGetUserHandle(ctx, pgtype.UUID{Bytes: actorID, Valid: true})
 }
 
 // AuditItem 是审计列表的一行。

@@ -24,7 +24,10 @@ type fakeQuerier struct {
 	setVerifyCalls int
 	deleteCalls    int
 	restoreCalls   int
-	auditCalls     int
+	auditCalls      int
+	lastActorHandle string
+	// 记录 includeDeleted 的传递，用于锁住「true 时必须能查到已删除行」。
+	lastPostsIncludeDeleted *bool
 }
 
 func (f *fakeQuerier) IsAdmin(_ context.Context, id uuid.UUID) (bool, error) {
@@ -71,7 +74,8 @@ func (f *fakeQuerier) AdminDailyActivity(context.Context, int32) ([]db.AdminDail
 func (f *fakeQuerier) AdminTopTags(context.Context, int32) ([]db.AdminTopTagsRow, error) {
 	return nil, nil
 }
-func (f *fakeQuerier) AdminListPosts(context.Context, db.AdminListPostsParams) ([]db.AdminListPostsRow, error) {
+func (f *fakeQuerier) AdminListPosts(_ context.Context, arg db.AdminListPostsParams) ([]db.AdminListPostsRow, error) {
+	f.lastPostsIncludeDeleted = arg.IncludeDeleted
 	return nil, nil
 }
 func (f *fakeQuerier) AdminListPapers(context.Context, db.AdminListPapersParams) ([]db.AdminListPapersRow, error) {
@@ -92,8 +96,13 @@ func (f *fakeQuerier) AdminSetUserVerify(_ context.Context, arg db.AdminSetUserV
 		VerifyOrg:  arg.VerifyOrg,
 	}, nil
 }
+func (f *fakeQuerier) AdminGetUserHandle(_ context.Context, id pgtype.UUID) (string, error) {
+	return "actor-handle", nil
+}
+
 func (f *fakeQuerier) AdminCreateAuditLog(_ context.Context, arg db.AdminCreateAuditLogParams) (db.AdminCreateAuditLogRow, error) {
 	f.auditCalls++
+	f.lastActorHandle = arg.ActorHandle
 	return db.AdminCreateAuditLogRow{}, f.auditErr
 }
 func (f *fakeQuerier) AdminListAuditLogs(context.Context, db.AdminListAuditLogsParams) ([]db.AdminAuditLog, error) {
@@ -389,6 +398,53 @@ func TestSetUserVerifyRequiresAdmin(t *testing.T) {
 	}
 	if f.setVerifyCalls != 0 || f.auditCalls != 0 {
 		t.Fatal("鉴权失败时不应触达写查询")
+	}
+}
+
+// TestListPostsPassesIncludeDeleted includeDeleted=true 必须原样传给查询层。
+//
+// 端到端验证时发现的真实缺陷：SQL 里写成
+//
+//	(include_deleted IS NOT TRUE AND deleted_at IS NULL)
+//
+// 当 include_deleted=true 时前半段为 false，整个条件恒假，
+// 「显示已删除」反而返回 0 条。正确语义是
+// (include_deleted IS TRUE OR deleted_at IS NULL)。
+func TestListPostsPassesIncludeDeleted(t *testing.T) {
+	f := &fakeQuerier{isAdmin: map[uuid.UUID]bool{adminID: true}}
+	s := newTestService(f)
+
+	if _, err := s.ListPosts(context.Background(), adminID, ContentFilter{IncludeDeleted: true}); err != nil {
+		t.Fatalf("ListPosts: %v", err)
+	}
+	if f.lastPostsIncludeDeleted == nil || !*f.lastPostsIncludeDeleted {
+		t.Fatal("includeDeleted=true 应原样传给查询层")
+	}
+
+	if _, err := s.ListPosts(context.Background(), adminID, ContentFilter{}); err != nil {
+		t.Fatalf("ListPosts: %v", err)
+	}
+	if f.lastPostsIncludeDeleted != nil {
+		t.Fatal("includeDeleted=false 应传 nil（SQL 里表示不过滤）")
+	}
+}
+
+// TestAuditRecordsRealActorHandle 审计必须记真实句柄，而不是 UUID 前缀。
+//
+// 端到端验证时发现的真实缺陷：早期实现用 actorID.String()[:8] 兜底，
+// 审计列表里显示的是 "01a20911" 这种片段，运营根本认不出是谁做的操作。
+func TestAuditRecordsRealActorHandle(t *testing.T) {
+	f := &fakeQuerier{isAdmin: map[uuid.UUID]bool{adminID: true}}
+	s := newTestService(f)
+
+	if _, err := s.SetUserVerify(context.Background(), adminID, targetID, VerifyInput{
+		VerifyType: VerifyScholar,
+		VerifyOrg:  "某大学",
+	}); err != nil {
+		t.Fatalf("授予认证失败：%v", err)
+	}
+	if f.lastActorHandle != "actor-handle" {
+		t.Fatalf("审计应记录真实句柄，实际 %q", f.lastActorHandle)
 	}
 }
 

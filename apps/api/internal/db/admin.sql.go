@@ -172,6 +172,19 @@ func (q *Queries) AdminFileStats(ctx context.Context) ([]AdminFileStatsRow, erro
 	return items, nil
 }
 
+const adminGetUserHandle = `-- name: AdminGetUserHandle :one
+SELECT handle FROM users WHERE id = $1
+`
+
+// 审计日志需要记录操作人的句柄（而不是 UUID 前缀），
+// 这样即使账号后来被注销，日志里也留着可读的「谁做的」。
+func (q *Queries) AdminGetUserHandle(ctx context.Context, id pgtype.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, adminGetUserHandle, id)
+	var handle string
+	err := row.Scan(&handle)
+	return handle, err
+}
+
 const adminGetUserVerify = `-- name: AdminGetUserVerify :one
 SELECT id, handle, verify_type, verify_org FROM users
 WHERE id = $1 AND deleted_at IS NULL
@@ -277,7 +290,7 @@ SELECT c.id, c.post_id, c.parent_id, c.author_id,
 FROM comments c
 JOIN users u ON u.id = c.author_id
 JOIN posts p ON p.id = c.post_id
-WHERE ($1::boolean IS NOT TRUE AND c.deleted_at IS NULL)
+WHERE ($1::boolean IS TRUE OR c.deleted_at IS NULL)
   AND ($2::text IS NULL OR c.content_text ILIKE $2::text)
   AND ($3::timestamptz IS NULL
        OR (c.created_at, c.id) < ($3::timestamptz, $4::uuid))
@@ -445,7 +458,7 @@ SELECT g.id, g.slug, g.name, g.description, g.owner_id,
        (SELECT count(*) FROM documents d WHERE d.group_id = g.id AND d.deleted_at IS NULL) AS document_count
 FROM groups g
 JOIN users u ON u.id = g.owner_id
-WHERE ($1::boolean IS NOT TRUE AND g.deleted_at IS NULL)
+WHERE ($1::boolean IS TRUE OR g.deleted_at IS NULL)
   AND ($2::text IS NULL
        OR g.name ILIKE $2::text
        OR g.slug ILIKE $2::text)
@@ -597,7 +610,7 @@ SELECT p.id, p.author_id, u.handle AS author_handle, u.name AS author_name,
        p.created_at, p.deleted_at
 FROM posts p
 JOIN users u ON u.id = p.author_id
-WHERE ($1::boolean IS NOT TRUE AND p.deleted_at IS NULL)
+WHERE ($1::boolean IS TRUE OR p.deleted_at IS NULL)
   AND ($2::text IS NULL OR p.content_text ILIKE $2::text)
   AND ($3::timestamptz IS NULL
        OR (p.created_at, p.id) < ($3::timestamptz, $4::uuid))

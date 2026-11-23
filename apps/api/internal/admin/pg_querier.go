@@ -54,6 +54,10 @@ func (p *pgQuerier) AdminSetUserVerify(ctx context.Context, arg db.AdminSetUserV
 	return p.q.AdminSetUserVerify(ctx, arg)
 }
 
+func (p *pgQuerier) AdminGetUserHandle(ctx context.Context, id pgtype.UUID) (string, error) {
+	return p.q.AdminGetUserHandle(ctx, id)
+}
+
 func (p *pgQuerier) AdminCreateAuditLog(ctx context.Context, arg db.AdminCreateAuditLogParams) (db.AdminCreateAuditLogRow, error) {
 	return p.q.AdminCreateAuditLog(ctx, arg)
 }

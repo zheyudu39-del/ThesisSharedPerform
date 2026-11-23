@@ -128,7 +128,7 @@ SELECT p.id, p.author_id, u.handle AS author_handle, u.name AS author_name,
        p.created_at, p.deleted_at
 FROM posts p
 JOIN users u ON u.id = p.author_id
-WHERE (sqlc.narg('include_deleted')::boolean IS NOT TRUE AND p.deleted_at IS NULL)
+WHERE (sqlc.narg('include_deleted')::boolean IS TRUE OR p.deleted_at IS NULL)
   AND (sqlc.narg('query')::text IS NULL OR p.content_text ILIKE sqlc.narg('query')::text)
   AND (sqlc.narg('cursor_at')::timestamptz IS NULL
        OR (p.created_at, p.id) < (sqlc.narg('cursor_at')::timestamptz, sqlc.narg('cursor_id')::uuid))
@@ -167,7 +167,7 @@ SELECT g.id, g.slug, g.name, g.description, g.owner_id,
        (SELECT count(*) FROM documents d WHERE d.group_id = g.id AND d.deleted_at IS NULL) AS document_count
 FROM groups g
 JOIN users u ON u.id = g.owner_id
-WHERE (sqlc.narg('include_deleted')::boolean IS NOT TRUE AND g.deleted_at IS NULL)
+WHERE (sqlc.narg('include_deleted')::boolean IS TRUE OR g.deleted_at IS NULL)
   AND (sqlc.narg('query')::text IS NULL
        OR g.name ILIKE sqlc.narg('query')::text
        OR g.slug ILIKE sqlc.narg('query')::text)
@@ -233,7 +233,7 @@ SELECT c.id, c.post_id, c.parent_id, c.author_id,
 FROM comments c
 JOIN users u ON u.id = c.author_id
 JOIN posts p ON p.id = c.post_id
-WHERE (sqlc.narg('include_deleted')::boolean IS NOT TRUE AND c.deleted_at IS NULL)
+WHERE (sqlc.narg('include_deleted')::boolean IS TRUE OR c.deleted_at IS NULL)
   AND (sqlc.narg('query')::text IS NULL OR c.content_text ILIKE sqlc.narg('query')::text)
   AND (sqlc.narg('cursor_at')::timestamptz IS NULL
        OR (c.created_at, c.id) < (sqlc.narg('cursor_at')::timestamptz, sqlc.narg('cursor_id')::uuid))
@@ -305,3 +305,8 @@ WHERE (sqlc.narg('action_prefix')::text IS NULL OR l.action LIKE sqlc.narg('acti
        OR (l.created_at, l.id) < (sqlc.narg('cursor_at')::timestamptz, sqlc.narg('cursor_id')::uuid))
 ORDER BY l.created_at DESC, l.id DESC
 LIMIT sqlc.arg('limit_count')::int;
+
+-- name: AdminGetUserHandle :one
+-- 审计日志需要记录操作人的句柄（而不是 UUID 前缀），
+-- 这样即使账号后来被注销，日志里也留着可读的「谁做的」。
+SELECT handle FROM users WHERE id = sqlc.arg('id');
