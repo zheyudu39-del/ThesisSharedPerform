@@ -72,9 +72,10 @@ COPY --from=build /repo/apps/web/package.json ./apps/web/package.json
 RUN addgroup -S app && adduser -S -G app app && chown -R app:app /repo
 USER app
 
-WORKDIR /repo/apps/web
+WORKDIR /repo
 EXPOSE 3000
-# 用 node 直接跑 next 的入口，而不是 node_modules/.bin/next：
-# pnpm 的 bin 软链在包的目录下（apps/web/node_modules/.bin），
-# 根目录的 node_modules/.bin 里并没有 next，按那个路径启动会 MODULE_NOT_FOUND。
-CMD ["node", "../node_modules/next/dist/bin/next", "start", "--port", "3000", "--hostname", "0.0.0.0"]
+# 用 pnpm 跑 package.json 里的 start 脚本，而不是拼 node_modules/.bin 路径：
+# pnpm 把依赖放在各包自己的 node_modules 下（apps/web/node_modules/next），
+# 根目录没有 .bin/next，写死路径会 MODULE_NOT_FOUND。
+# 运行镜像已启用 corepack，pnpm 可用。
+CMD ["pnpm", "--filter", "@thesis/web", "start"]
