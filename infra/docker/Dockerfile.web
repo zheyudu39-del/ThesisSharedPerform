@@ -74,4 +74,7 @@ USER app
 
 WORKDIR /repo/apps/web
 EXPOSE 3000
-CMD ["../../node_modules/.bin/next", "start", "--port", "3000", "--hostname", "0.0.0.0"]
+# 用 node 直接跑 next 的入口，而不是 node_modules/.bin/next：
+# pnpm 的 bin 软链在包的目录下（apps/web/node_modules/.bin），
+# 根目录的 node_modules/.bin 里并没有 next，按那个路径启动会 MODULE_NOT_FOUND。
+CMD ["node", "../node_modules/next/dist/bin/next", "start", "--port", "3000", "--hostname", "0.0.0.0"]
