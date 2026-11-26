@@ -5,6 +5,14 @@ WORKDIR /src
 
 # 先只拷依赖清单，让 go mod download 这一层能命中缓存。
 COPY apps/api/go.mod apps/api/go.sum ./
+
+# Go 官方模块代理 proxy.golang.org 在国内不可达（dial tcp i/o timeout），
+# 必须换国内镜像，否则 go mod download 必然失败。
+# direct 作为兜底：代理上没有的模块直连拉取。
+ENV GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+# 校验和数据库同步换到国内镜像，否则 sum.golang.org 同样连不上。
+ENV GOSUMDB=sum.golang.google.cn
+
 RUN go mod download
 
 COPY apps/api/ ./
