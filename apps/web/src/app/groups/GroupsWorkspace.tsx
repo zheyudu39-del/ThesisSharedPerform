@@ -69,7 +69,7 @@ export function GroupsWorkspace() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-4xl px-5 py-10">
+    <main className="mx-auto w-full max-w-page px-5 py-10">
       <div className="mb-8 flex flex-wrap items-end justify-between gap-4 border-b border-line pb-7">
         <div className="min-w-0">
           <p className="mb-3 font-mono text-[0.72rem] tracking-[0.16em] text-ink-3 uppercase">
@@ -135,7 +135,7 @@ export function GroupsWorkspace() {
         </div>
       ) : (
         <>
-          <ul className="flex flex-col gap-3">
+          <ul className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
             {groups.map((group) => (
               <li key={group.id}>
                 <GroupCard group={group} />

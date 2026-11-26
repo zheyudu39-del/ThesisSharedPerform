@@ -68,7 +68,7 @@ function PapersPanel() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-4xl px-5 py-10">
+    <main className="mx-auto w-full max-w-page px-5 py-10">
       <div className="mb-8 border-b border-line pb-7">
         <p className="mb-3 font-mono text-[0.72rem] tracking-[0.16em] text-ink-3 uppercase">
           论文库 · Papers
@@ -82,7 +82,7 @@ function PapersPanel() {
       </div>
 
       {/* 解析表单 */}
-      <form onSubmit={handleResolve} className="mb-8">
+      <form onSubmit={handleResolve} className="mb-8 max-w-3xl">
         <div className="flex flex-col gap-2.5 sm:flex-row">
           <label htmlFor="paper-input" className="sr-only">
             DOI、arXiv 编号或论文链接
@@ -154,7 +154,7 @@ function PapersPanel() {
             {user ? "还没有论文。粘贴一个 DOI 或 arXiv 编号开始。" : "登录后可以添加论文。"}
           </p>
         ) : (
-          <ul className="flex flex-col gap-3">
+          <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {papers.map((p) => (
               <li key={p.id}>
                 <PaperListItem paper={p} />
@@ -211,7 +211,7 @@ function PaperListItem({ paper }: { paper: PaperDTO }) {
   return (
     <Link
       href={`/papers/${paper.id}`}
-      className="block rounded-[12px] border border-line bg-surface p-4 transition-colors hover:border-line-strong"
+      className="flex h-full flex-col rounded-[12px] border border-line bg-surface p-4 transition-colors hover:border-line-strong"
     >
       <h3 className="mb-1 font-display text-[0.98rem] leading-snug font-semibold">{paper.title}</h3>
       <p className="mb-2 text-[0.8rem] text-ink-2">
@@ -221,7 +221,7 @@ function PaperListItem({ paper }: { paper: PaperDTO }) {
           .join(", ")}
         {paper.authors.length > 4 && " 等"}
       </p>
-      <p className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[0.68rem] text-ink-3">
+      <p className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[0.68rem] text-ink-3">
         {paper.doi && <span>{paper.doi}</span>}
         {paper.arxivId && <span>arXiv:{paper.arxivId}</span>}
         {paper.venue && <span>{paper.venue}</span>}

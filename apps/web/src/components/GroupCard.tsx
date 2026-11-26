@@ -30,7 +30,7 @@ export function GroupCard({ group }: GroupCardProps) {
   return (
     <Link
       href={`/groups/${encodeURIComponent(group.slug)}`}
-      className="group flex gap-4 rounded-[12px] border border-line bg-surface p-4 shadow-[var(--shadow-1)] transition-colors hover:border-line-strong"
+      className="group flex h-full gap-4 rounded-[12px] border border-line bg-surface p-4 shadow-[var(--shadow-1)] transition-colors hover:border-line-strong"
     >
       {/* 封面：有图用图，没有则用字标方块，保证列表整齐 */}
       <div className="relative size-14 shrink-0 overflow-hidden rounded-[6px] bg-surface-2">

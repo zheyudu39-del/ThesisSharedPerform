@@ -17,7 +17,7 @@ export function SiteHeader() {
 
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-paper/88 backdrop-blur-md">
-      <div className="mx-auto flex h-[60px] max-w-6xl items-center gap-6 px-5">
+      <div className="mx-auto flex h-[60px] max-w-page items-center gap-6 px-5">
         <Link href="/" className="flex items-center gap-2.5">
           <span className="grid size-6 place-items-center rounded-[3px] bg-seal font-display text-[13px] font-semibold text-white shadow-[inset_0_0_0_2px_rgba(255,255,255,0.24)]">
             印

@@ -19,11 +19,19 @@ type Config struct {
 	RedisAddr     string
 	RedisPassword string
 
-	S3Endpoint  string
-	S3AccessKey string
-	S3SecretKey string
-	S3Bucket    string
-	S3UseSSL    bool
+	// S3Endpoint 是服务端自己访问存储用的地址（可以是容器内网名，如 s3:8333）。
+	S3Endpoint string
+	// S3PublicEndpoint 是**浏览器**访问存储用的地址，用于生成预签名 URL。
+	//
+	// 为什么必须分开：预签名 URL 的签名覆盖 host，服务端用它自己那条
+	// 内网路径签出来的 URL，浏览器拿到后 host 解析不了（s3:8333）；
+	// 反过来如果服务端也用公网地址，则每次读写文件都要绕一圈公网。
+	// 留空时回退到 S3Endpoint，单机开发不用配。
+	S3PublicEndpoint string
+	S3AccessKey      string
+	S3SecretKey      string
+	S3Bucket         string
+	S3UseSSL         bool
 
 	JWTSecret string
 	JWTTTL    time.Duration
@@ -54,11 +62,12 @@ func Load() Config {
 		RedisAddr:     getenv("REDIS_HOST", "localhost") + ":" + getenv("REDIS_PORT", "6379"),
 		RedisPassword: getenv("REDIS_PASSWORD", ""),
 
-		S3Endpoint:  getenv("S3_ENDPOINT", "localhost:9000"),
-		S3AccessKey: getenv("S3_ACCESS_KEY", "minioadmin"),
-		S3SecretKey: getenv("S3_SECRET_KEY", "minioadmin"),
-		S3Bucket:    getenv("S3_BUCKET", "thesis-files"),
-		S3UseSSL:    getenv("S3_USE_SSL", "false") == "true",
+		S3Endpoint:       getenv("S3_ENDPOINT", "localhost:9000"),
+		S3PublicEndpoint: getenv("S3_PUBLIC_ENDPOINT", ""),
+		S3AccessKey:      getenv("S3_ACCESS_KEY", "minioadmin"),
+		S3SecretKey:      getenv("S3_SECRET_KEY", "minioadmin"),
+		S3Bucket:         getenv("S3_BUCKET", "thesis-files"),
+		S3UseSSL:         getenv("S3_USE_SSL", "false") == "true",
 
 		JWTSecret:   getenv("JWT_SECRET", devJWTSecret),
 		JWTTTL:      time.Hour * 168,

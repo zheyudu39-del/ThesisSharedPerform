@@ -30,7 +30,7 @@ export default async function TagsPage() {
   return (
     <>
       <SiteHeader />
-      <main className="mx-auto w-full max-w-[760px] px-4 py-8 sm:px-6">
+      <main className="mx-auto w-full max-w-page px-4 py-10 sm:px-6">
         <header className="mb-6">
           <h1 className="font-display text-[clamp(1.6rem,4vw,2.2rem)] leading-tight font-semibold tracking-[-0.02em]">
             话题

@@ -34,6 +34,14 @@
   --font-body: var(--font-body-loaded), system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: var(--font-mono-loaded), "SF Mono", "Cascadia Mono", monospace;
 
+  /*
+    页面容器宽度。首页是三栏（索引 188 + 信息流 + 侧栏 312），
+    1440px 才能在 1920 屏幕上让两侧留白从 384px 收到 240px 左右，
+    同时中栏仍有 800px 以上，不至于把帖子卡片压窄。
+    顶栏与首页共用这一个 token，左右边缘才能对齐。
+  */
+  --container-page: 90rem;
+
   /* 圆角 */
   --radius-s: 3px;
   --radius-m: 6px;

@@ -26,11 +26,18 @@ var ErrUnavailable = errors.New("对象存储不可用")
 
 // Config 是对象存储的连接参数，由 config.Config 映射而来。
 type Config struct {
-	Endpoint  string
-	AccessKey string
-	SecretKey string
-	Bucket    string
-	UseSSL    bool
+	// Endpoint 是服务端自己读写对象用的地址，通常是容器内网名（s3:8333）。
+	Endpoint string
+	// PublicEndpoint 是生成**预签名 URL** 时使用的地址，必须浏览器可达。
+	//
+	// 签名覆盖 host，所以「签名用哪条路径」和「浏览器访问哪条路径」必须一致。
+	// 单机开发留空即回退到 Endpoint；生产环境把它设为 nginx 对外的地址，
+	// 否则浏览器拿到 s3:8333 这种解析不了的 host。
+	PublicEndpoint string
+	AccessKey      string
+	SecretKey      string
+	Bucket         string
+	UseSSL         bool
 }
 
 // Client 是对象存储的最小封装，只暴露上传流水线需要的操作。
@@ -40,7 +47,11 @@ type Config struct {
 // 服务恢复。这里改为首次使用时惰性确认，失败后按间隔重试，S3 晚起或
 // 中途重启都能自愈。
 type Client struct {
-	mc     *minio.Client
+	// mc 用于服务端自己的读写与桶检查，走内网。
+	mc *minio.Client
+	// signer 仅用于生成预签名 URL，端点必须浏览器可达。
+	// 单机开发时与 mc 指向同一端点。
+	signer *minio.Client
 	bucket string
 
 	mu        sync.Mutex
@@ -65,15 +76,27 @@ func New(cfg Config) (*Client, error) {
 		return nil, errors.New("对象存储桶未配置")
 	}
 
-	mc, err := minio.New(cfg.Endpoint, &minio.Options{
+	opts := &minio.Options{
 		Creds:        credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure:       cfg.UseSSL,
 		BucketLookup: minio.BucketLookupPath,
-	})
+	}
+
+	mc, err := minio.New(cfg.Endpoint, opts)
 	if err != nil {
 		return nil, fmt.Errorf("创建对象存储客户端: %w", err)
 	}
-	return &Client{mc: mc, bucket: cfg.Bucket}, nil
+
+	// 默认签名器与读写共用一条链路（单机开发、以及 nginx 直通 S3 端口的部署）。
+	signer := mc
+	if cfg.PublicEndpoint != "" && cfg.PublicEndpoint != cfg.Endpoint {
+		signer, err = minio.New(cfg.PublicEndpoint, opts)
+		if err != nil {
+			return nil, fmt.Errorf("创建预签名客户端: %w", err)
+		}
+	}
+
+	return &Client{mc: mc, signer: signer, bucket: cfg.Bucket}, nil
 }
 
 // Bucket 返回当前使用的桶名。
@@ -91,7 +114,7 @@ func (c *Client) PresignPut(ctx context.Context, key, contentType string, ttl ti
 	if contentType != "" {
 		headers.Set("Content-Type", contentType)
 	}
-	u, err := c.mc.PresignHeader(ctx, http.MethodPut, c.bucket, key, ttl, url.Values{}, headers)
+	u, err := c.signer.PresignHeader(ctx, http.MethodPut, c.bucket, key, ttl, url.Values{}, headers)
 	if err != nil {
 		return "", fmt.Errorf("生成上传地址: %w", err)
 	}
@@ -103,7 +126,7 @@ func (c *Client) PresignGet(ctx context.Context, key string, ttl time.Duration) 
 	if err := c.ensure(ctx); err != nil {
 		return "", err
 	}
-	u, err := c.mc.PresignedGetObject(ctx, c.bucket, key, ttl, url.Values{})
+	u, err := c.signer.PresignedGetObject(ctx, c.bucket, key, ttl, url.Values{})
 	if err != nil {
 		return "", fmt.Errorf("生成下载地址: %w", err)
 	}

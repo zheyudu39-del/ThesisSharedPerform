@@ -1,0 +1,14 @@
+# 构建上下文是仓库根目录，排除无关的大目录，否则每次构建都要传几百 MB。
+.git
+.gitignore
+node_modules
+**/node_modules
+.next
+**/.next
+apps/api/bin
+*.log
+.env
+.env.*
+!.env.prod.example
+docs
+*.tar.gz

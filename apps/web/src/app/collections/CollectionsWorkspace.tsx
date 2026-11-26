@@ -55,7 +55,7 @@ export function CollectionsWorkspace() {
   }
 
   return (
-    <main className="mx-auto max-w-4xl px-5 py-10">
+    <main className="mx-auto max-w-page px-5 py-10">
       <div className="mb-8 flex flex-wrap items-end justify-between gap-4 border-b border-line pb-7">
         <div>
           <p className="mb-3 font-mono text-[0.72rem] tracking-[0.16em] text-ink-3 uppercase">
@@ -109,7 +109,7 @@ export function CollectionsWorkspace() {
         </p>
       ) : (
         <>
-          <ul className="grid gap-3 sm:grid-cols-2">
+          <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             {collections.map((collection) => (
               <li key={collection.id}>
                 <CollectionCard collection={collection} />

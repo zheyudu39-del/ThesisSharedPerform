@@ -194,7 +194,7 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
   const grouped = groupByType(items);
 
   return (
-    <main className="mx-auto w-full max-w-4xl px-5 py-10">
+    <main className="mx-auto w-full max-w-page px-5 py-10">
       <div className="mb-7 border-b border-line pb-7">
         <p className="mb-3 font-mono text-[0.72rem] tracking-[0.16em] text-ink-3 uppercase">
           检索 · Search
@@ -356,7 +356,7 @@ export function SearchWorkspace({ initialQuery = "" }: { initialQuery?: string }
                   >
                     {SEARCH_TYPE_LABEL[value]} · {list.length}
                   </h2>
-                  <ul className="flex flex-col gap-2">
+                  <ul className="grid gap-2 lg:grid-cols-2">
                     {list.map((item) => (
                       <li key={`${item.entityType}-${item.entityId}`}>
                         <ResultCard item={item} />
@@ -453,7 +453,7 @@ function ResultCard({ item }: { item: SearchItem }) {
   );
 
   const className =
-    "block rounded-[12px] border border-line bg-surface px-4 py-3.5 transition-colors";
+    "block h-full rounded-[12px] border border-line bg-surface px-4 py-3.5 transition-colors";
 
   if (href) {
     return (

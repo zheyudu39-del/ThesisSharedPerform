@@ -1,16 +1,60 @@
 # ---- build stage ----
-FROM golang:1.25-alpine AS build
+# go.mod 要求 go 1.26.0；用 1.25 会直接拒绝构建。
+FROM golang:1.26-alpine AS build
 WORKDIR /src
+
+# 先只拷依赖清单，让 go mod download 这一层能命中缓存。
 COPY apps/api/go.mod apps/api/go.sum ./
 RUN go mod download
+
 COPY apps/api/ ./
-RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/api ./cmd/server
+# CGO_ENABLED=0：静态二进制，运行镜像不需要 glibc。
+# 版本号通过 ldflags 注入，/health 与日志里能看出部署的是哪一版。
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /bin/api ./cmd/server
+
+# goose 只用于一次性迁移容器（compose 里的 migrate 服务）。
+# 装进构建层再拷过去，运行层不额外引入 Go 工具链。
+RUN CGO_ENABLED=0 GOOS=linux GOBIN=/bin go install github.com/pressly/goose/v3/cmd/goose@v3.30.1
 
 # ---- runtime stage ----
+# 转码与导出依赖外部程序，缺了功能会静默降级，所以一并装进运行镜像：
+#   poppler-utils → pdftoppm / pdfinfo / pdftotext（PDF 预览与全文检索）
+#   libreoffice   → soffice（Word / PPT / Excel 转 PDF）
+#   fontconfig + 中文字体 → 否则中文 PDF 渲染出来是方框
+# tzdata 让日志与「相对时间」按北京时间显示。
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates tzdata
+
+RUN apk add --no-cache \
+        ca-certificates \
+        tzdata \
+        poppler-utils \
+        libreoffice \
+        fontconfig \
+        ttf-dejavu \
+        font-noto-cjk \
+    && ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone
+
+ENV TZ=Asia/Shanghai
+
 WORKDIR /app
 COPY --from=build /bin/api /app/api
+# 迁移二进制与 SQL 一起进镜像：compose 的 migrate 服务复用同一个镜像，
+# 只换 entrypoint，避免服务器上再单独装 goose。
+COPY --from=build /bin/goose /app/goose
 COPY apps/api/db/migrations /app/db/migrations
+
+# 以非 root 运行：容器逃逸时减少可写面。
+# LibreOffice 首次运行需要可写的用户配置目录，因此显式给 /tmp 权限。
+RUN addgroup -S app && adduser -S -G app app \
+    && mkdir -p /tmp/lo && chown -R app:app /tmp/lo /app
+USER app
+
+ENV HOME=/tmp
+
 EXPOSE 8080
 ENTRYPOINT ["/app/api"]

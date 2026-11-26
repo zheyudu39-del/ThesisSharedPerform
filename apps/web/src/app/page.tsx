@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/AuthProvider";
+import { HomeIndex } from "@/components/HomeIndex";
+import { HomeRail } from "@/components/HomeRail";
 import { PostCard } from "@/components/PostCard";
 import { PostComposer } from "@/components/PostComposer";
 import { SiteHeader } from "@/components/SiteHeader";
@@ -185,7 +187,7 @@ export default function HomePage() {
     <>
       <SiteHeader />
 
-      <main className="mx-auto max-w-6xl px-5 py-10">
+      <main className="mx-auto max-w-page px-5 py-10">
         {/* 页面标题区 */}
         <div className="mb-8 border-b border-line pb-7">
           <p className="mb-3 font-mono text-[0.72rem] tracking-[0.16em] text-ink-3 uppercase">
@@ -199,11 +201,23 @@ export default function HomePage() {
           </p>
         </div>
 
-        <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_280px]">
+        {/*
+          三栏：索引 / 信息流 / 信息轨。
+          左侧索引与右侧信息轨都只在 xl 以上出现——1200px 以下三栏会把
+          信息流压到 600px 以内，读长帖已经很挤；此时退回两栏（信息流 + 右轨），
+          再窄则只留信息流，三档流切换回到中栏顶部横排。
+        */}
+        <div className="grid gap-8 xl:grid-cols-[188px_minmax(0,1fr)_312px] lg:grid-cols-[minmax(0,1fr)_312px]">
+          <aside className="hidden xl:block">
+            <div className="sticky top-[84px]">
+              <HomeIndex stream={stream} onStreamChange={changeStream} />
+            </div>
+          </aside>
+
           {/* 信息流 */}
           <div className="flex min-w-0 flex-col gap-4">
-            {/* 三档流切换 + 精选入口 */}
-            <div className="flex flex-wrap items-center gap-1.5">
+            {/* 三档流切换 + 精选入口（窄屏可见；宽屏由左侧索引承担） */}
+            <div className="flex flex-wrap items-center gap-1.5 xl:hidden">
               {STREAMS.map((s) => (
                 <Tab key={s} active={stream === s} onClick={() => changeStream(s)}>
                   {STREAM_LABEL[s]}
@@ -222,6 +236,11 @@ export default function HomePage() {
               </Link>
               <span className="ml-2 font-mono text-[0.7rem] text-ink-3">{STREAM_HINT[stream]}</span>
             </div>
+
+            {/* 宽屏：流说明单独一行，位置固定，避免切换时布局跳动。 */}
+            <p className="hidden font-mono text-[0.7rem] text-ink-3 xl:block">
+              {STREAM_LABEL[stream]} · {STREAM_HINT[stream]}
+            </p>
 
             {/* 发帖框：登录后显示 */}
             {status === "authenticated" && !authRequired && (
@@ -284,26 +303,11 @@ export default function HomePage() {
             )}
           </div>
 
-          {/* 侧栏 */}
-          <aside className="hidden flex-col gap-4 lg:flex">
-            <SidePanel title="排序规则">
-              <p className="text-[0.82rem] leading-relaxed text-ink-2">
-                关注流按发布时间倒序，不做任何加权。热门流使用公开的热度公式，规则对所有人一致。
-              </p>
-              <pre className="mt-3 overflow-x-auto rounded-[6px] border border-line bg-surface-2 p-3 font-mono text-[0.72rem] leading-relaxed text-ink-2">
-{`raw = 1.0·likes + 2.0·comments
-    + 3.0·reposts
-hot = raw / (hours + 2)^1.5`}
-              </pre>
-            </SidePanel>
-
-            <SidePanel title="服务状态">
-              <div className="flex flex-col gap-2 text-[0.82rem]">
-                <StatusRow label="API" ok={health?.status === "ok"} value={health?.status ?? "不可达"} />
-                <StatusRow label="数据库" ok={health?.database === "up"} value={health?.database ?? "—"} />
-                <StatusRow label="版本" ok value={health?.version ?? "—"} mono />
-              </div>
-            </SidePanel>
+          {/* 信息轨 */}
+          <aside className="hidden lg:block">
+            <div className="sticky top-[84px]">
+              <HomeRail health={health} />
+            </div>
           </aside>
         </div>
       </main>
@@ -497,35 +501,3 @@ function Tab({
   );
 }
 
-function SidePanel({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="rounded-[12px] border border-line bg-surface p-4">
-      <h2 className="mb-3 font-mono text-[0.7rem] font-semibold tracking-[0.1em] text-ink-3 uppercase">
-        {title}
-      </h2>
-      {children}
-    </section>
-  );
-}
-
-function StatusRow({
-  label,
-  ok,
-  value,
-  mono = false,
-}: {
-  label: string;
-  ok: boolean;
-  value: string;
-  mono?: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-3">
-      <span className="text-ink-2">{label}</span>
-      <span className={`flex items-center gap-1.5 ${mono ? "font-mono" : ""}`}>
-        <span className={`size-1.5 rounded-full ${ok ? "bg-good" : "bg-danger"}`} />
-        {value}
-      </span>
-    </div>
-  );
-}

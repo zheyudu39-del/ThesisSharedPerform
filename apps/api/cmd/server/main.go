@@ -52,11 +52,12 @@ func main() {
 	// 恢复。桶的确认改为在首次使用存储时惰性完成，失败返回 503 并自动重试。
 	var store *storage.Client
 	if sc, err := storage.New(storage.Config{
-		Endpoint:  cfg.S3Endpoint,
-		AccessKey: cfg.S3AccessKey,
-		SecretKey: cfg.S3SecretKey,
-		Bucket:    cfg.S3Bucket,
-		UseSSL:    cfg.S3UseSSL,
+		Endpoint:       cfg.S3Endpoint,
+		PublicEndpoint: cfg.S3PublicEndpoint,
+		AccessKey:      cfg.S3AccessKey,
+		SecretKey:      cfg.S3SecretKey,
+		Bucket:         cfg.S3Bucket,
+		UseSSL:         cfg.S3UseSSL,
 	}); err != nil {
 		slog.Warn("对象存储未配置，文件上传功能已禁用", "err", err)
 	} else {
