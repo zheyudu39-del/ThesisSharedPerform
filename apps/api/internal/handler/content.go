@@ -38,7 +38,9 @@ func (h *ContentHandler) CreatePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req createPostRequest
-	if !decodeRequest(w, r, &req) {
+	// 正文限 5000 字符，但富文本 HTML 带标记后可能膨胀数倍；
+	// 附件列表也在这个请求体里。64KB 在极端情况下会误伤，留 1MB 余量。
+	if !decodeRequestLimit(w, r, &req, 1<<20) {
 		return
 	}
 	paperID, ok := parseOptionalUUID(w, req.PaperID, "paperId")
@@ -421,7 +423,8 @@ func (h *ContentHandler) UpdatePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req updatePostRequest
-	if !decodeRequest(w, r, &req) {
+	// 与 CreatePost 同理：富文本 HTML 可能远超纯文本长度。
+	if !decodeRequestLimit(w, r, &req, 1<<20) {
 		return
 	}
 	input := content.UpdatePostInput{Visibility: req.Visibility}

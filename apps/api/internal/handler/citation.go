@@ -48,7 +48,8 @@ func (h *CitationHandler) ImportReferences(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		BibTeX string `json:"bibtex"`
 	}
-	if !decodeRequest(w, r, &req) {
+	// BibTeX 文件动辄几十上百条，几 MB 很常见，64KB 会误伤。
+	if !decodeRequestLimit(w, r, &req, 8<<20) {
 		return
 	}
 	result, err := h.service.ImportBibTeX(r.Context(), userID, docID, req.BibTeX)

@@ -559,7 +559,8 @@ func (h *DocumentHandler) Export(w http.ResponseWriter, r *http.Request) {
 		HTML   string `json:"html"`
 		Format string `json:"format"`
 	}
-	if !decodeRequest(w, r, &req) {
+	// 导出把整篇正文 HTML 塞进请求体，长文档远超 64KB。
+	if !decodeRequestLimit(w, r, &req, 16<<20) {
 		return
 	}
 	result, err := h.service.ExportHTML(r.Context(), userID, docID, req.HTML, req.Format)
@@ -621,7 +622,11 @@ func (h *DocumentHandler) Import(w http.ResponseWriter, r *http.Request) {
 		Format        string `json:"format"`
 		ContentBase64 string `json:"contentBase64"`
 	}
-	if !decodeRequest(w, r, &req) {
+	// 整个文件以 base64 放进 JSON，体积约为原文件的 4/3。
+	// 服务层允许 32MB 原文件，这里给 48MB 的请求体上限留出编码余量。
+	// 用默认的 64KB 会让任何超过 48KB 的文档导入失败，且报错文案
+	// 是「请求体格式不正确」，用户会误以为是文件格式问题。
+	if !decodeRequestLimit(w, r, &req, 48<<20) {
 		return
 	}
 

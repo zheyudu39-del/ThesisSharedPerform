@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -120,12 +121,36 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	}{User: user})
 }
 
+// defaultMaxBodyBytes 是普通 JSON 请求体的上限。
+// 绝大多数接口只收几十到几百字节的字段，64KB 足够宽裕。
+const defaultMaxBodyBytes int64 = 64 << 10
+
+// decodeRequest 解码 JSON 请求体，使用默认 64KB 上限。
+//
+// 需要传大文件（如文档导入把整个 Word 以 base64 塞进 JSON）的接口
+// 不能沿用这个上限，应改用 decodeRequestLimit 显式指定。
 func decodeRequest(w http.ResponseWriter, r *http.Request, target any) bool {
+	return decodeRequestLimit(w, r, target, defaultMaxBodyBytes)
+}
+
+// decodeRequestLimit 与 decodeRequest 相同，但允许调用方指定请求体上限。
+//
+// 为什么要区分：导入 Word/LaTeX 时整个文件会以 base64 编码放进 JSON，
+// 体积约为原文件的 4/3。用 64KB 上限会让任何超过 48KB 的文档都报
+// 「请求体格式不正确」，而用户看到的是「格式不正确」——完全误导。
+func decodeRequestLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) bool {
 	defer func() { _ = r.Body.Close() }()
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
+		// 区分「超限」与「格式错误」：前者提示文件太大，后者才是格式问题。
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			WriteError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				fmt.Sprintf("请求体超过 %d MB 上限，请改用更小的文件或分次导入", maxBytes>>20))
+			return false
+		}
 		WriteError(w, http.StatusUnprocessableEntity, "validation_error", "请求体格式不正确")
 		return false
 	}
