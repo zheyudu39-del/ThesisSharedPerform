@@ -105,6 +105,10 @@ services:
       S3_SECRET_KEY: ${S3_SECRET_KEY}
       S3_BUCKET: ${S3_BUCKET:-thesis-files}
       S3_USE_SSL: ${S3_USE_SSL:-false}
+      # 预签名 URL 的协议，与 S3_USE_SSL（服务端连内网存储）独立。
+      # 公网走 HTTPS 时必须为 true，否则浏览器拿到 http:// 的预签名
+      # URL 会被当成混合内容拦截，上传/下载静默失败。
+      S3_PUBLIC_USE_SSL: ${S3_PUBLIC_USE_SSL:-false}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET 未设置}
       # 浏览器直连协同服务，必须是对外可达的 wss://
       WS_PUBLIC_URL: ${WS_PUBLIC_URL:?WS_PUBLIC_URL 未设置}
