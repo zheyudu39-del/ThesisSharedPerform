@@ -54,6 +54,7 @@ func main() {
 	if sc, err := storage.New(storage.Config{
 		Endpoint:       cfg.S3Endpoint,
 		PublicEndpoint: cfg.S3PublicEndpoint,
+		PublicUseSSL:   cfg.S3PublicUseSSL,
 		AccessKey:      cfg.S3AccessKey,
 		SecretKey:      cfg.S3SecretKey,
 		Bucket:         cfg.S3Bucket,

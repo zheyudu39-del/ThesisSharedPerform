@@ -34,10 +34,13 @@ type Config struct {
 	// 单机开发留空即回退到 Endpoint；生产环境把它设为 nginx 对外的地址，
 	// 否则浏览器拿到 s3:8333 这种解析不了的 host。
 	PublicEndpoint string
-	AccessKey      string
-	SecretKey      string
-	Bucket         string
-	UseSSL         bool
+	// PublicUseSSL 决定预签名 URL 的协议（https / http），
+	// 与内网读写的 UseSSL 相互独立。
+	PublicUseSSL bool
+	AccessKey    string
+	SecretKey    string
+	Bucket       string
+	UseSSL       bool
 }
 
 // Client 是对象存储的最小封装，只暴露上传流水线需要的操作。
@@ -76,21 +79,31 @@ func New(cfg Config) (*Client, error) {
 		return nil, errors.New("对象存储桶未配置")
 	}
 
-	opts := &minio.Options{
-		Creds:        credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+	creds := credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, "")
+
+	// 读写客户端走内网，SSL 由 UseSSL 决定（容器内一般是明文）。
+	mc, err := minio.New(cfg.Endpoint, &minio.Options{
+		Creds:        creds,
 		Secure:       cfg.UseSSL,
 		BucketLookup: minio.BucketLookupPath,
-	}
-
-	mc, err := minio.New(cfg.Endpoint, opts)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("创建对象存储客户端: %w", err)
 	}
 
-	// 默认签名器与读写共用一条链路（单机开发、以及 nginx 直通 S3 端口的部署）。
+	// 预签名客户端面向浏览器，必须用公网地址与公网协议。
+	//
+	// 关键：Secure 不能沿用 UseSSL。生产环境内网是 http（UseSSL=false），
+	// 但公网走 HTTPS 时签名必须按 https 计算——否则生成的 URL 是
+	// http://domain/thesis-files/...，浏览器从 https 页面发 PUT 会被
+	// 混合内容策略拦掉。所以这里单独按 PublicEndpoint 的协议判断。
 	signer := mc
 	if cfg.PublicEndpoint != "" && cfg.PublicEndpoint != cfg.Endpoint {
-		signer, err = minio.New(cfg.PublicEndpoint, opts)
+		signer, err = minio.New(cfg.PublicEndpoint, &minio.Options{
+			Creds:        creds,
+			Secure:       cfg.PublicUseSSL,
+			BucketLookup: minio.BucketLookupPath,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("创建预签名客户端: %w", err)
 		}

@@ -28,10 +28,15 @@ type Config struct {
 	// 反过来如果服务端也用公网地址，则每次读写文件都要绕一圈公网。
 	// 留空时回退到 S3Endpoint，单机开发不用配。
 	S3PublicEndpoint string
-	S3AccessKey      string
-	S3SecretKey      string
-	S3Bucket         string
-	S3UseSSL         bool
+	// S3PublicUseSSL 决定预签名 URL 用 https 还是 http。
+	// 与 S3UseSSL（服务端连内网存储）相互独立：容器内是明文 http，
+	// 但公网走 HTTPS 时签名必须按 https 算，否则浏览器会拦混合内容。
+	// 留空时回退到 S3UseSSL。
+	S3PublicUseSSL bool
+	S3AccessKey    string
+	S3SecretKey    string
+	S3Bucket       string
+	S3UseSSL       bool
 
 	JWTSecret string
 	JWTTTL    time.Duration
@@ -64,6 +69,7 @@ func Load() Config {
 
 		S3Endpoint:       getenv("S3_ENDPOINT", "localhost:9000"),
 		S3PublicEndpoint: getenv("S3_PUBLIC_ENDPOINT", ""),
+		S3PublicUseSSL:   getenvBool("S3_PUBLIC_USE_SSL", getenv("S3_USE_SSL", "false") == "true"),
 		S3AccessKey:      getenv("S3_ACCESS_KEY", "minioadmin"),
 		S3SecretKey:      getenv("S3_SECRET_KEY", "minioadmin"),
 		S3Bucket:         getenv("S3_BUCKET", "thesis-files"),
@@ -102,4 +108,14 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getenvBool 读取布尔型环境变量；未设置时用 fallback。
+// 接受 true / 1 / yes，其余非空值一律视为 false。
+func getenvBool(key string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return fallback
+	}
+	return v == "true" || v == "1" || v == "yes"
 }
